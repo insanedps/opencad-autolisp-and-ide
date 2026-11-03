@@ -1,0 +1,6 @@
+/target
+*.dll
+*.exe
+*.pdb
+__pycache__/
+*.pyc
