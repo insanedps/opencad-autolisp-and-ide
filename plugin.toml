@@ -7,9 +7,7 @@ author = "OpenCAD Contributor"
 license = "GPL-3.0-only"
 
 [opencad]
-api_version = 13
-rustc_version = "rustc 1.98.1 (48a229cea 2026-09-01)"
-acadrust_source = "git+https://github.com/HakanSeven12/acadrust.git?rev=299dc75#299dc758f958b08accc35a10d98b83e228fafc89"
+api_version = 14
 ribbon_order = 150
 command_prefixes = ["OCAIDE", "LSP", "LISP", "LSPRUN", "LSPLIST", "LSPRELOAD", "LSPDIR", "LSPERR", "LISPERR", "APPLOAD"]
 xdata_apps = []
