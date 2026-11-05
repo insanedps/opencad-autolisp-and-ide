@@ -9,6 +9,9 @@ on:
 permissions:
   contents: write
 
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
 jobs:
   build:
     name: Build (${{ matrix.os }})
@@ -50,9 +53,14 @@ jobs:
       - name: Checkout OpenCADStudio
         uses: actions/checkout@v4
         with:
-          repository: HakanSeven12/OpenCADStudio
-          ref: 0ab929d5e22de19a5dc3fb6228f6afacb66ac7f0
+          repository: yztink/OpenCADStudio
+          ref: 6ccfb142f6425d8de4914b6e611e803e359ac901
           path: OpenCADStudio
+
+      - name: Redirect deleted HakanSeven12/acadrust URL to hakanaktt/acadrust
+        run: |
+          git config --global url."https://github.com/hakanaktt/acadrust.git".insteadOf "https://github.com/HakanSeven12/acadrust.git"
+          git config --global url."https://github.com/hakanaktt/acadrust".insteadOf "https://github.com/HakanSeven12/acadrust"
 
       # 2. Setup Rust toolchain
       - name: Set up Rust
