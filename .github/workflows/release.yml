@@ -9,9 +9,6 @@ on:
 permissions:
   contents: write
 
-env:
-  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-
 jobs:
   build:
     name: Build (${{ matrix.os }})
@@ -53,8 +50,8 @@ jobs:
       - name: Checkout OpenCADStudio
         uses: actions/checkout@v4
         with:
-          repository: yztink/OpenCADStudio
-          ref: 6ccfb142f6425d8de4914b6e611e803e359ac901
+          repository: HakanSeven12/OpenCADStudio
+          ref: 0ab929d5e22de19a5dc3fb6228f6afacb66ac7f0
           path: OpenCADStudio
 
       # 2. Setup Rust toolchain
