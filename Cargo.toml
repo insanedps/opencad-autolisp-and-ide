@@ -1,6 +1,6 @@
 [package]
 name = "opencad-autolisp-and-ide"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "AutoLISP command, script runner, and OCAIDE editor plugin for OpenCAD Studio"
 license = "GPL-3.0-only"
@@ -12,9 +12,11 @@ crate-type = ["cdylib", "rlib"]
 [[bin]]
 name = "opencad_autolisp_ide"
 path = "src/bin/opencad_autolisp_ide.rs"
+required-features = ["ide-gui"]
 
 [features]
 default = []
+ide-gui = ["dep:iced", "dep:iced_aw", "dep:fontdb", "dep:rfd"]
 python = ["dep:pyo3"]
 
 [dependencies]
@@ -25,10 +27,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 lisp-core = { path = "../opencad-autolisp-engine/crates/lisp-core" }
 lisp-cad = { path = "../opencad-autolisp-engine/crates/lisp-cad" }
-iced = { git = "https://github.com/iced-rs/iced.git", rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39", features = ["image", "svg", "advanced", "canvas", "smol", "markdown", "highlighter"] }
-iced_aw = { git = "https://github.com/HakanSeven12/iced_aw.git", branch = "agent/fix-iced-fonts", features = ["menu", "context_menu", "color_picker", "drop_down"] }
-fontdb = "0.23"
-rfd = "0.17"
+iced = { git = "https://github.com/iced-rs/iced.git", rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39", features = ["svg", "advanced", "canvas", "smol", "markdown", "highlighter"], optional = true }
+iced_aw = { git = "https://github.com/HakanSeven12/iced_aw.git", branch = "agent/fix-iced-fonts", features = ["menu", "context_menu", "color_picker", "drop_down"], optional = true }
+fontdb = { version = "0.23", optional = true }
+rfd = { version = "0.17", optional = true }
 
 [dev-dependencies]
 interprocess = "2.4"

@@ -669,3 +669,177 @@ fn send_to_stream(stream_arc: &Arc<Mutex<TcpStream>>, msg: &PluginToIde) {
         }
     }
 }
+
+#[cfg(windows)]
+pub fn force_foreground_ide() {
+    std::thread::spawn(|| unsafe {
+        extern "system" {
+            fn GetForegroundWindow() -> *mut std::ffi::c_void;
+            fn BringWindowToTop(hWnd: *mut std::ffi::c_void) -> i32;
+            fn SetForegroundWindow(hWnd: *mut std::ffi::c_void) -> i32;
+            fn ShowWindow(hWnd: *mut std::ffi::c_void, nCmdShow: i32) -> i32;
+            fn IsIconic(hWnd: *mut std::ffi::c_void) -> i32;
+            fn EnumWindows(lpEnumFunc: unsafe extern "system" fn(*mut std::ffi::c_void, isize) -> i32, lParam: isize) -> i32;
+            fn GetWindowTextW(hWnd: *mut std::ffi::c_void, lpString: *mut u16, nMaxCount: i32) -> i32;
+            fn SetWindowPos(
+                hWnd: *mut std::ffi::c_void,
+                hWndInsertAfter: *mut std::ffi::c_void,
+                X: i32,
+                Y: i32,
+                cx: i32,
+                cy: i32,
+                uFlags: u32,
+            ) -> i32;
+        }
+
+        const HWND_TOPMOST: *mut std::ffi::c_void = -1isize as *mut std::ffi::c_void;
+        const HWND_NOTOPMOST: *mut std::ffi::c_void = -2isize as *mut std::ffi::c_void;
+        const SWP_NOSIZE: u32 = 0x0001;
+        const SWP_NOMOVE: u32 = 0x0002;
+        const SWP_SHOWWINDOW: u32 = 0x0040;
+        const SW_RESTORE: i32 = 9;
+
+        unsafe extern "system" fn enum_proc(hwnd: *mut std::ffi::c_void, _: isize) -> i32 {
+            let mut buf = [0u16; 256];
+            let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), 256);
+            if len > 0 {
+                let title = String::from_utf16_lossy(&buf[..len as usize]);
+                if title.contains("(OCAIDE)") || title.contains("(OCIDE)") || title.contains("(OCSIDE)") {
+                    let fg = GetForegroundWindow();
+                    if fg != hwnd {
+                        if IsIconic(hwnd) != 0 {
+                            ShowWindow(hwnd, SW_RESTORE);
+                        }
+                        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+                        SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+                        BringWindowToTop(hwnd);
+                        SetForegroundWindow(hwnd);
+                    }
+                    return 0;
+                }
+            }
+            1
+        }
+        EnumWindows(enum_proc, 0);
+    });
+}
+
+#[cfg(windows)]
+pub fn force_foreground_ocside() {
+    force_foreground_ide();
+}
+
+#[cfg(target_os = "macos")]
+pub fn force_foreground_ide() {
+    let _ = std::process::Command::new("osascript")
+        .args(["-e", "tell application \"opencad_autolisp_ide\" to activate"])
+        .spawn();
+}
+
+#[cfg(target_os = "macos")]
+pub fn force_foreground_ocside() {
+    force_foreground_ide();
+}
+
+#[cfg(target_os = "linux")]
+pub fn force_foreground_ide() {
+    let _ = std::process::Command::new("wmctrl")
+        .args(["-a", "OCAIDE"])
+        .spawn()
+        .or_else(|_| {
+            std::process::Command::new("xdotool")
+                .args(["search", "--name", "OCAIDE", "windowactivate"])
+                .spawn()
+        });
+}
+
+#[cfg(target_os = "linux")]
+pub fn force_foreground_ocside() {
+    force_foreground_ide();
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+pub fn force_foreground_ide() {}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+pub fn force_foreground_ocside() {}
+
+#[cfg(windows)]
+pub fn force_foreground_cad() {
+    std::thread::spawn(|| unsafe {
+        extern "system" {
+            fn GetForegroundWindow() -> *mut std::ffi::c_void;
+            fn BringWindowToTop(hWnd: *mut std::ffi::c_void) -> i32;
+            fn SetForegroundWindow(hWnd: *mut std::ffi::c_void) -> i32;
+            fn ShowWindow(hWnd: *mut std::ffi::c_void, nCmdShow: i32) -> i32;
+            fn IsIconic(hWnd: *mut std::ffi::c_void) -> i32;
+            fn EnumWindows(lpEnumFunc: unsafe extern "system" fn(*mut std::ffi::c_void, isize) -> i32, lParam: isize) -> i32;
+            fn GetWindowTextW(hWnd: *mut std::ffi::c_void, lpString: *mut u16, nMaxCount: i32) -> i32;
+            fn SetWindowPos(
+                hWnd: *mut std::ffi::c_void,
+                hWndInsertAfter: *mut std::ffi::c_void,
+                X: i32,
+                Y: i32,
+                cx: i32,
+                cy: i32,
+                uFlags: u32,
+            ) -> i32;
+        }
+
+        const HWND_TOPMOST: *mut std::ffi::c_void = -1isize as *mut std::ffi::c_void;
+        const HWND_NOTOPMOST: *mut std::ffi::c_void = -2isize as *mut std::ffi::c_void;
+        const SWP_NOSIZE: u32 = 0x0001;
+        const SWP_NOMOVE: u32 = 0x0002;
+        const SWP_SHOWWINDOW: u32 = 0x0040;
+        const SW_RESTORE: i32 = 9;
+
+        unsafe extern "system" fn enum_proc(hwnd: *mut std::ffi::c_void, _: isize) -> i32 {
+            let mut buf = [0u16; 256];
+            let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), 256);
+            if len > 0 {
+                let title = String::from_utf16_lossy(&buf[..len as usize]);
+                let is_cad = (title.contains("Open CAD Studio") || title.contains("OpenCAD"))
+                    && !title.contains("(OCAIDE)")
+                    && !title.contains("(OCIDE)")
+                    && !title.contains("(OCSIDE)");
+                if is_cad {
+                    let fg = GetForegroundWindow();
+                    if fg != hwnd {
+                        if IsIconic(hwnd) != 0 {
+                            ShowWindow(hwnd, SW_RESTORE);
+                        }
+                        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+                        SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+                        BringWindowToTop(hwnd);
+                        SetForegroundWindow(hwnd);
+                    }
+                    return 0;
+                }
+            }
+            1
+        }
+        EnumWindows(enum_proc, 0);
+    });
+}
+
+#[cfg(target_os = "macos")]
+pub fn force_foreground_cad() {
+    let _ = std::process::Command::new("osascript")
+        .args(["-e", "tell application \"OpenCADStudio\" to activate"])
+        .spawn();
+}
+
+#[cfg(target_os = "linux")]
+pub fn force_foreground_cad() {
+    let _ = std::process::Command::new("wmctrl")
+        .args(["-a", "Open CAD Studio"])
+        .spawn()
+        .or_else(|_| {
+            std::process::Command::new("xdotool")
+                .args(["search", "--name", "Open CAD Studio", "windowactivate"])
+                .spawn()
+        });
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+pub fn force_foreground_cad() {}

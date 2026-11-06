@@ -977,7 +977,7 @@ impl LispInteractiveBridge {
             || crate::rust_lisp::is_debug_task_running();
         if active {
             crate::ide::server::broadcast_to_ide(&crate::ide::protocol::PluginToIde::FocusCad);
-            crate::ide::app::force_foreground_cad();
+            crate::ide::server::force_foreground_cad();
         }
         active
     }
@@ -985,7 +985,7 @@ impl LispInteractiveBridge {
     fn restore_focus_to_ide_after_input(&self, had_debug_session: bool) {
         if had_debug_session && crate::rust_lisp::is_currently_paused_in_debugger() {
             let _ = crate::ide::server::focus_or_check_alive();
-            crate::ide::app::force_foreground_ocside();
+            crate::ide::server::force_foreground_ocside();
         }
     }
 

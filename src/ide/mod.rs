@@ -1,12 +1,22 @@
 pub mod protocol;
 pub mod server;
+#[cfg(feature = "ide-gui")]
 pub mod client;
+#[cfg(feature = "ide-gui")]
 pub mod view;
+#[cfg(feature = "ide-gui")]
 pub mod app;
+#[cfg(feature = "ide-gui")]
 pub mod paren;
+#[cfg(feature = "ide-gui")]
 pub mod highlight;
+#[cfg(feature = "ide-gui")]
 pub mod api_docs;
 
+pub use protocol::ReplMode;
+
+#[cfg(feature = "ide-gui")]
+mod gui_state {
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,8 +24,7 @@ use iced::widget::text_editor;
 use iced::{Color, Point, Size};
 use serde::{Deserialize, Serialize};
 use crate::ide::highlight::{color_serde, SyntaxColors, UserTheme};
-use crate::ide::protocol::PluginToIde;
-pub use protocol::ReplMode;
+use crate::ide::protocol::{self, PluginToIde};
 
 pub mod custom_funcs_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -1047,3 +1056,7 @@ mod tests {
         assert_eq!(m4.len(), 5);
     }
 }
+}
+
+#[cfg(feature = "ide-gui")]
+pub use gui_state::*;
