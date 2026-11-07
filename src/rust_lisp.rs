@@ -23,7 +23,7 @@ use lisp_core::{eval_str, Env, LispError, Value};
 use crate::context::{active_interactive, set_active_interactive, with_host, WorkerMsg};
 use crate::interactive::{InteractionMode, LispInteractiveBridge, RubberBandSpec};
 
-static REGISTERED_LISP_COMMANDS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+static REGISTERED_LISP_COMMANDS: OnceLock<Mutex<HashMap<u64, HashMap<String, String>>>> = OnceLock::new();
 static GLOBAL_LISP_BRIDGE: OnceLock<Arc<Mutex<OpenCadRustBridge>>> = OnceLock::new();
 static LISP_TASK_TX: OnceLock<std::sync::mpsc::Sender<LispTask>> = OnceLock::new();
 static LISP_OUTPUT_BUFFER: Mutex<String> = Mutex::new(String::new());
@@ -184,7 +184,7 @@ pub fn push_formatted_error(host: &mut dyn HostApi, prefix: &str, err_text: &str
     }
 }
 
-fn get_registered_commands() -> &'static Mutex<HashMap<String, String>> {
+fn get_registered_commands() -> &'static Mutex<HashMap<u64, HashMap<String, String>>> {
     REGISTERED_LISP_COMMANDS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -212,6 +212,13 @@ enum LispTask {
         lisp_call: String,
         worker_tx: std::sync::mpsc::Sender<WorkerMsg>,
         done: std::sync::mpsc::Sender<()>,
+    },
+    CloseTab {
+        tab_id: u64,
+    },
+    WithTab {
+        tab_id: u64,
+        task: Box<LispTask>,
     },
 }
 
@@ -283,8 +290,7 @@ fn get_task_tx() -> &'static std::sync::mpsc::Sender<LispTask> {
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
                 let global_bridge = get_global_bridge();
-                let mut env = create_cad_env(global_bridge.clone());
-                register_cad_reflection_builtins(&mut env.borrow_mut(), global_bridge.clone());
+                let mut tab_envs: HashMap<u64, std::rc::Rc<std::cell::RefCell<Env>>> = HashMap::new();
 
                 lisp_core::set_output_sink(Some(Box::new(|text: &str| {
                     if text.is_empty() {
@@ -367,7 +373,25 @@ fn get_task_tx() -> &'static std::sync::mpsc::Sender<LispTask> {
                 )));
 
                 while let Ok(task) = rx.recv() {
+                    let (active_tab, task) = match task {
+                        LispTask::CloseTab { tab_id } => {
+                            tab_envs.remove(&tab_id);
+                            continue;
+                        }
+                        LispTask::WithTab { tab_id, task } => (tab_id, *task),
+                        other => (0, other),
+                    };
+                    crate::context::set_thread_tab_id(Some(active_tab));
+                    let mut env = tab_envs
+                        .entry(active_tab)
+                        .or_insert_with(|| {
+                            let new_env = create_cad_env(global_bridge.clone());
+                            register_cad_reflection_builtins(&mut new_env.borrow_mut(), global_bridge.clone());
+                            new_env
+                        })
+                        .clone();
                     match task {
+                        LispTask::CloseTab { .. } | LispTask::WithTab { .. } => unreachable!(),
                         LispTask::Eval { code, resp, worker_tx } => {
                             DEBUG_PAUSED_DURING_TASK.store(false, std::sync::atomic::Ordering::SeqCst);
                             global_bridge.lock().unwrap().reset_stream();
@@ -2054,8 +2078,11 @@ impl CadBridge for OpenCadRustBridge {
     }
 
     fn register_command(&mut self, name: &str, _description: &str) -> Result<(), String> {
+        let tab_id = crate::context::get_active_tab_id();
         let mut cmds = get_registered_commands().lock().unwrap();
-        cmds.insert(name.to_uppercase(), name.to_string());
+        cmds.entry(tab_id)
+            .or_default()
+            .insert(name.to_uppercase(), name.to_string());
         Ok(())
     }
 
@@ -2964,6 +2991,7 @@ impl CadBridge for OpenCadRustBridge {
         def.cancel_label = cancel_lbl.to_string();
         def.width = Some(360.0);
         def.rows.push(DialogRow::single(DialogControl::InfoText {
+            id: None,
             text: prompt.to_string(),
             align_h: None,
         }));
@@ -3556,24 +3584,70 @@ fn entity_to_dxf(ent: &EntityType) -> Vec<(i16, DxfValue)> {
     list
 }
 
-/// Check if a command is registered in the AutoLISP environment
-pub fn has_lisp_command(name: &str) -> bool {
+/// Check if a command is registered in the AutoLISP environment for a specific drawing tab
+pub fn has_lisp_command_for_tab(tab_id: u64, name: &str) -> bool {
     let upper = name.to_uppercase();
-    get_registered_commands().lock().unwrap().contains_key(&upper)
+    get_registered_commands()
+        .lock()
+        .unwrap()
+        .get(&tab_id)
+        .is_some_and(|cmds| cmds.contains_key(&upper))
+}
+
+/// Check if a command is registered in the active drawing tab's AutoLISP environment
+pub fn has_lisp_command(name: &str) -> bool {
+    has_lisp_command_for_tab(crate::context::get_active_tab_id(), name)
+}
+
+static INITIALIZED_TABS: OnceLock<Mutex<std::collections::HashSet<u64>>> = OnceLock::new();
+
+fn get_initialized_tabs() -> &'static Mutex<std::collections::HashSet<u64>> {
+    INITIALIZED_TABS.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Ensure that a drawing tab has had `scripts/` and Startup Scripts (`autolisp_startup.json`)
+/// auto-loaded into its isolated environment at least once.
+pub fn ensure_tab_initialized(host: &mut dyn HostApi) {
+    let tab_id = host.tab_id();
+    crate::context::set_thread_tab_id(Some(tab_id));
+    if tab_id == 0 {
+        return;
+    }
+    crate::context::set_active_tab_id(tab_id);
+    let already_init = get_initialized_tabs().lock().unwrap().contains(&tab_id);
+    if !already_init {
+        let _ = auto_load_lisp_scripts(host);
+    }
+}
+
+/// Clean up and drop the isolated AutoLISP environment and commands for a closed drawing tab
+pub fn clean_tab_state(tab_id: u64) {
+    get_initialized_tabs().lock().unwrap().remove(&tab_id);
+    get_registered_commands().lock().unwrap().remove(&tab_id);
+    let _ = get_task_tx().send(LispTask::CloseTab { tab_id });
 }
 
 /// Evaluate an AutoLISP expression directly in the pure Rust environment
 pub fn eval_lisp_expr(expr: &str, host: &mut dyn HostApi) -> bool {
+    let tab_id = host.tab_id();
+    crate::context::set_thread_tab_id(Some(tab_id));
+    if tab_id != 0 {
+        crate::context::set_active_tab_id(tab_id);
+    }
     DEBUG_PAUSED_DURING_TASK.store(false, std::sync::atomic::Ordering::SeqCst);
-    let sender = host.plugin_request_sender().map(Arc::from);
-    crate::context::set_global_sender(sender);
+    if let Some(sender) = host.plugin_request_sender().map(Arc::from) {
+        crate::context::set_global_sender(Some(sender));
+    }
 
     let (tx, rx) = std::sync::mpsc::channel();
     let (worker_tx, worker_rx) = std::sync::mpsc::channel();
-    let task = LispTask::Eval {
-        code: expr.to_string(),
-        resp: tx,
-        worker_tx,
+    let task = LispTask::WithTab {
+        tab_id,
+        task: Box::new(LispTask::Eval {
+            code: expr.to_string(),
+            resp: tx,
+            worker_tx,
+        }),
     };
     let _ = get_task_tx().send(task);
 
@@ -3620,9 +3694,10 @@ pub fn eval_lisp_str_unspanned_headless(code: &str) -> Result<Option<String>, St
 }
 
 fn eval_lisp_str_headless_impl(code: &str, unspanned: bool) -> Result<Option<String>, String> {
+    let tab_id = crate::context::get_active_tab_id();
     let (tx, rx) = std::sync::mpsc::channel();
     let (worker_tx, worker_rx) = std::sync::mpsc::channel();
-    let task = if unspanned {
+    let inner = if unspanned {
         LispTask::EvalUnspanned {
             code: code.to_string(),
             resp: tx,
@@ -3634,6 +3709,10 @@ fn eval_lisp_str_headless_impl(code: &str, unspanned: bool) -> Result<Option<Str
             resp: tx,
             worker_tx,
         }
+    };
+    let task = LispTask::WithTab {
+        tab_id,
+        task: Box::new(inner),
     };
     let _ = get_task_tx().send(task);
 
@@ -3735,27 +3814,104 @@ pub fn list_lisp_scripts() -> Vec<String> {
     scripts
 }
 
-/// Return sorted list of registered AutoLISP `c:NAME` commands.
-pub fn get_registered_lisp_commands() -> Vec<String> {
+/// Return sorted list of registered AutoLISP `c:NAME` commands for a specific drawing tab.
+pub fn get_registered_lisp_commands_for_tab(tab_id: u64) -> Vec<String> {
     let mut list: Vec<String> = get_registered_commands()
         .lock()
         .unwrap()
-        .keys()
-        .cloned()
-        .collect();
+        .get(&tab_id)
+        .map(|cmds| cmds.keys().cloned().collect())
+        .unwrap_or_default();
     list.sort();
     list
+}
+
+/// Return sorted list of registered AutoLISP `c:NAME` commands in the active drawing tab.
+pub fn get_registered_lisp_commands() -> Vec<String> {
+    get_registered_lisp_commands_for_tab(crate::context::get_active_tab_id())
 }
 
 static LOADED_LISP_SCRIPTS: std::sync::LazyLock<Mutex<HashMap<String, String>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
+static PENDING_IDE_SCRIPTS: std::sync::LazyLock<Mutex<Vec<(u64, String)>>> =
+    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
+
+fn cache_script_keys(map: &mut HashMap<String, String>, title: &str, code: &str) {
+    map.insert(title.to_string(), code.to_string());
+    let norm_title = title.replace('\\', "/");
+    map.insert(norm_title.clone(), code.to_string());
+    map.insert(norm_title.to_lowercase(), code.to_string());
+
+    let path = Path::new(title);
+    if let Some(file_name) = path.file_name().and_then(|f| f.to_str()) {
+        map.insert(file_name.to_string(), code.to_string());
+        map.insert(file_name.to_lowercase(), code.to_string());
+        map.insert(file_name.to_uppercase(), code.to_string());
+    }
+    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+        map.insert(stem.to_string(), code.to_string());
+        map.insert(stem.to_lowercase(), code.to_string());
+        map.insert(stem.to_uppercase(), code.to_string());
+
+        for prefix in &["c-", "c_", "C-", "C_"] {
+            if let Some(stripped) = stem.strip_prefix(prefix) {
+                map.insert(stripped.to_string(), code.to_string());
+                map.insert(stripped.to_lowercase(), code.to_string());
+                map.insert(stripped.to_uppercase(), code.to_string());
+            }
+        }
+    }
+
+    let lower = code.to_ascii_lowercase();
+    let mut search_from = 0;
+    while let Some(pos) = lower[search_from..].find("defun") {
+        let abs = search_from + pos + 5;
+        let rest = &lower[abs..];
+        let trimmed = rest.trim_start();
+        if let Some(after_c) = trimmed.strip_prefix("c:") {
+            let cmd_name: String = after_c
+                .chars()
+                .take_while(|c| !c.is_whitespace() && *c != '(' && *c != ')' && *c != ';')
+                .collect();
+            if !cmd_name.is_empty() {
+                map.insert(cmd_name.clone(), code.to_string());
+                map.insert(cmd_name.to_uppercase(), code.to_string());
+            }
+        }
+        search_from = abs;
+    }
+}
+
 /// Store script code loaded or executed from OCSIDE into in-memory cache.
 pub fn store_loaded_script(title: &str, code: &str) {
-    let mut map = LOADED_LISP_SCRIPTS.lock().unwrap();
-    map.insert(title.to_string(), code.to_string());
-    if let Some(stem) = Path::new(title).file_stem().and_then(|s| s.to_str()) {
-        map.insert(stem.to_lowercase(), code.to_string());
+    {
+        let mut map = LOADED_LISP_SCRIPTS.lock().unwrap();
+        cache_script_keys(&mut map, title, code);
+    }
+    let current_tab = crate::context::get_active_tab_id();
+    PENDING_IDE_SCRIPTS
+        .lock()
+        .unwrap()
+        .push((current_tab, code.to_string()));
+}
+
+/// Replay any scripts loaded from OCAIDE if the active drawing tab in OCS differs
+/// from the tab ID that was active when OCAIDE ran `eval_lisp_str_headless`.
+pub fn sync_pending_ide_scripts_for_tab(host: &mut dyn HostApi) {
+    let tab_id = host.tab_id();
+    crate::context::set_thread_tab_id(Some(tab_id));
+    if tab_id != 0 {
+        crate::context::set_active_tab_id(tab_id);
+    }
+    let pending: Vec<(u64, String)> = {
+        let mut queue = PENDING_IDE_SCRIPTS.lock().unwrap();
+        std::mem::take(&mut *queue)
+    };
+    for (loaded_tab, code) in pending {
+        if loaded_tab != tab_id {
+            let _ = eval_lisp_expr(&code, host);
+        }
     }
 }
 
@@ -3769,9 +3925,24 @@ pub fn get_loaded_script(name: &str) -> Option<String> {
     if let Some(c) = map.get(&lower) {
         return Some(c.clone());
     }
+    let upper = name.to_uppercase();
+    if let Some(c) = map.get(&upper) {
+        return Some(c.clone());
+    }
+    let norm = name.replace('\\', "/");
+    if let Some(c) = map.get(&norm) {
+        return Some(c.clone());
+    }
     if let Some(stem) = Path::new(name).file_stem().and_then(|s| s.to_str()) {
         if let Some(c) = map.get(&stem.to_lowercase()) {
             return Some(c.clone());
+        }
+        for prefix in &["c-", "c_", "C-", "C_"] {
+            if let Some(stripped) = stem.strip_prefix(prefix) {
+                if let Some(c) = map.get(&stripped.to_lowercase()) {
+                    return Some(c.clone());
+                }
+            }
         }
     }
     None
@@ -3822,19 +3993,150 @@ pub fn auto_load_lisp_scripts(host: &mut dyn HostApi) -> usize {
         }
     }
 
-    let before_count = get_registered_commands().lock().unwrap().len();
+    let tab_id = host.tab_id();
+    crate::context::set_active_tab_id(tab_id);
+    if tab_id != 0 {
+        get_initialized_tabs().lock().unwrap().insert(tab_id);
+    }
+    let before_count = get_registered_commands()
+        .lock()
+        .unwrap()
+        .get(&tab_id)
+        .map_or(0, |m| m.len());
     for path in files_to_load {
         let _ = load_lisp_file(&path.to_string_lossy(), host);
     }
-    let after_count = get_registered_commands().lock().unwrap().len();
+    let _ = crate::appload::auto_load_startup_scripts(host);
+    let after_count = get_registered_commands()
+        .lock()
+        .unwrap()
+        .get(&tab_id)
+        .map_or(0, |m| m.len());
     after_count.saturating_sub(before_count)
+}
+
+/// Automatically load all `.lsp` / `.lisp` files in `scripts/`, `scripts/autoload/`, and Startup Scripts headlessly for the active tab.
+pub fn auto_load_lisp_scripts_headless() -> usize {
+    let tab_id = crate::context::get_active_tab_id();
+    if tab_id != 0 {
+        get_initialized_tabs().lock().unwrap().insert(tab_id);
+    }
+    let Ok(dir) = ensure_scripts_dir() else {
+        return crate::appload::auto_load_startup_scripts_headless();
+    };
+    let mut files_to_load = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if filename.starts_with('_') || filename.starts_with('.') {
+                    continue;
+                }
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if ext.eq_ignore_ascii_case("lsp") || ext.eq_ignore_ascii_case("lisp") {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        let lower = content.to_lowercase();
+                        if lower.contains("defun c:") || lower.contains("defun") {
+                            files_to_load.push(path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let autoload_dir = dir.join("autoload");
+    if autoload_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&autoload_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if !filename.starts_with('_') && !filename.starts_with('.') {
+                        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                        if ext.eq_ignore_ascii_case("lsp") || ext.eq_ignore_ascii_case("lisp") {
+                            files_to_load.push(path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let before_count = get_registered_commands()
+        .lock()
+        .unwrap()
+        .get(&tab_id)
+        .map_or(0, |m| m.len());
+    for path in files_to_load {
+        let _ = load_lisp_file_headless(&path);
+    }
+    let _ = crate::appload::auto_load_startup_scripts_headless();
+    let after_count = get_registered_commands()
+        .lock()
+        .unwrap()
+        .get(&tab_id)
+        .map_or(0, |m| m.len());
+    after_count.saturating_sub(before_count)
+}
+
+/// Load an AutoLISP `.lsp` file into the active tab's environment without requiring a direct `HostApi` ref.
+pub fn load_lisp_file_headless(path: &Path) -> Result<(), String> {
+    if let Ok(content) = std::fs::read_to_string(path) {
+        let mut map = LOADED_LISP_SCRIPTS.lock().unwrap();
+        cache_script_keys(&mut map, &path.to_string_lossy(), &content);
+    }
+    let tab_id = crate::context::get_active_tab_id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (worker_tx, worker_rx) = std::sync::mpsc::channel();
+    let task = LispTask::WithTab {
+        tab_id,
+        task: Box::new(LispTask::Load {
+            path: path.to_path_buf(),
+            resp: tx,
+            worker_tx,
+        }),
+    };
+    let _ = get_task_tx().send(task);
+
+    let mut fallback_host = crate::context::DebugHost::new(crate::context::get_global_sender());
+
+    loop {
+        match worker_rx.try_recv() {
+            Ok(WorkerMsg::HostCall(mut task)) => {
+                if with_host(|h| task(h)).is_err() {
+                    task(&mut fallback_host);
+                }
+            }
+            _ => {}
+        }
+        match rx.try_recv() {
+            Ok(res) => return res,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                return Err("AutoLISP worker disconnected".to_string());
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
 }
 
 /// Load an AutoLISP `.lsp` file into the pure Rust environment
 pub fn load_lisp_file(path_str: &str, host: &mut dyn HostApi) -> bool {
+    let tab_id = host.tab_id();
+    crate::context::set_thread_tab_id(Some(tab_id));
+    if tab_id != 0 {
+        crate::context::set_active_tab_id(tab_id);
+    }
     let path = Path::new(path_str);
     let resolved = if path.is_file() {
         path.to_path_buf()
+    } else if Path::new(&format!("{path_str}.lsp")).is_file() {
+        PathBuf::from(format!("{path_str}.lsp"))
+    } else if Path::new(&format!("{path_str}.lisp")).is_file() {
+        PathBuf::from(format!("{path_str}.lisp"))
     } else {
         let dir = scripts_dir();
         let candidate = dir.join(path_str);
@@ -3849,12 +4151,46 @@ pub fn load_lisp_file(path_str: &str, host: &mut dyn HostApi) -> bool {
         }
     };
 
+    // If the file is not in `scripts/` on disk, check if it was loaded in memory from OCAIDE or APPLOAD
+    if !resolved.is_file() {
+        if let Some(in_mem_code) = get_loaded_script(path_str) {
+            let ok = eval_lisp_expr(&in_mem_code, host);
+            if ok {
+                let stem = Path::new(path_str)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(path_str);
+                let clean_stem = stem
+                    .strip_prefix("c-")
+                    .or_else(|| stem.strip_prefix("c_"))
+                    .or_else(|| stem.strip_prefix("C-"))
+                    .or_else(|| stem.strip_prefix("C_"))
+                    .unwrap_or(stem);
+                let lower_code = in_mem_code.to_ascii_lowercase();
+                let call_pat = format!("(c:{}", clean_stem.to_ascii_lowercase());
+                if has_lisp_command_for_tab(host.tab_id(), clean_stem)
+                    && !lower_code.contains(&call_pat)
+                {
+                    return execute_lisp_command(clean_stem, &[], host);
+                }
+                host.push_info(&format!("Loaded AutoLISP script from IDE: {path_str}"));
+            }
+            return ok;
+        }
+    } else if let Ok(content) = std::fs::read_to_string(&resolved) {
+        let mut map = LOADED_LISP_SCRIPTS.lock().unwrap();
+        cache_script_keys(&mut map, &resolved.to_string_lossy(), &content);
+    }
+
     let (tx, rx) = std::sync::mpsc::channel();
     let (worker_tx, worker_rx) = std::sync::mpsc::channel();
-    let task = LispTask::Load {
-        path: resolved.clone(),
-        resp: tx,
-        worker_tx,
+    let task = LispTask::WithTab {
+        tab_id,
+        task: Box::new(LispTask::Load {
+            path: resolved.clone(),
+            resp: tx,
+            worker_tx,
+        }),
     };
     let _ = get_task_tx().send(task);
 
@@ -3862,6 +4198,10 @@ pub fn load_lisp_file(path_str: &str, host: &mut dyn HostApi) -> bool {
         match worker_rx.try_recv() {
             Ok(WorkerMsg::HostCall(mut task)) => {
                 task(host);
+            }
+            Ok(WorkerMsg::InteractiveStarted(cmd)) => {
+                host.start_interactive(cmd);
+                return true;
             }
             _ => {}
         }
@@ -3888,19 +4228,28 @@ pub fn load_lisp_file(path_str: &str, host: &mut dyn HostApi) -> bool {
 
 /// Execute a registered AutoLISP command (like TARGET from c:target)
 pub fn execute_lisp_command(cmd_name: &str, _args: &[String], host: &mut dyn HostApi) -> bool {
+    let tab_id = host.tab_id();
+    crate::context::set_thread_tab_id(Some(tab_id));
+    if tab_id != 0 {
+        crate::context::set_active_tab_id(tab_id);
+    }
     let upper = cmd_name.to_uppercase();
     let lisp_call = format!("(c:{})", upper.to_lowercase());
 
     let (worker_tx, worker_rx) = std::sync::mpsc::channel();
     let (done_tx, done_rx) = std::sync::mpsc::channel();
 
-    let sender = host.plugin_request_sender().map(Arc::from);
-    crate::context::set_global_sender(sender);
+    if let Some(sender) = host.plugin_request_sender().map(Arc::from) {
+        crate::context::set_global_sender(Some(sender));
+    }
 
-    let task = LispTask::ExecuteCommand {
-        lisp_call,
-        worker_tx,
-        done: done_tx,
+    let task = LispTask::WithTab {
+        tab_id,
+        task: Box::new(LispTask::ExecuteCommand {
+            lisp_call,
+            worker_tx,
+            done: done_tx,
+        }),
     };
     let _ = get_task_tx().send(task);
 
@@ -5063,6 +5412,53 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
 
         crate::context::set_global_sender(None);
+    }
+
+    #[test]
+    fn test_per_drawing_tab_namespace_isolation() {
+        let tab_a: u64 = 9001;
+        let tab_b: u64 = 9002;
+
+        clean_tab_state(tab_a);
+        clean_tab_state(tab_b);
+
+        // 1. In Drawing Tab A: define c:PROJECT_A and a tab-specific c:CALC_PARAM
+        crate::context::set_thread_tab_id(Some(tab_a));
+        let _ = eval_lisp_str_headless("(defun c:project_a () \"A_ONLY\")").unwrap();
+        let _ = eval_lisp_str_headless("(defun c:calc_param () 100)").unwrap();
+
+        assert!(has_lisp_command_for_tab(tab_a, "PROJECT_A"));
+        assert!(has_lisp_command_for_tab(tab_a, "CALC_PARAM"));
+        assert!(!has_lisp_command_for_tab(tab_b, "PROJECT_A"), "PROJECT_A must not leak into Tab B");
+        assert!(!has_lisp_command_for_tab(tab_b, "CALC_PARAM"), "CALC_PARAM must not leak into Tab B");
+
+        // 2. Switch to Drawing Tab B: define c:PROJECT_B and a different c:CALC_PARAM
+        crate::context::set_thread_tab_id(Some(tab_b));
+        let _ = eval_lisp_str_headless("(defun c:project_b () \"B_ONLY\")").unwrap();
+        let _ = eval_lisp_str_headless("(defun c:calc_param () 250)").unwrap();
+
+        assert!(has_lisp_command_for_tab(tab_b, "PROJECT_B"));
+        assert!(!has_lisp_command_for_tab(tab_a, "PROJECT_B"), "PROJECT_B must not leak into Tab A");
+
+        // Verify Tab B evaluates its own version of c:calc_param (250) and does not have c:project_a
+        let res_b = eval_lisp_str_headless("(c:calc_param)").unwrap();
+        assert_eq!(res_b.as_deref(), Some("250"));
+        assert!(eval_lisp_str_headless("(c:project_a)").is_err());
+
+        // 3. Switch back to Drawing Tab A: verify Tab A still evaluates its own version (100)
+        crate::context::set_thread_tab_id(Some(tab_a));
+        let res_a = eval_lisp_str_headless("(c:calc_param)").unwrap();
+        assert_eq!(res_a.as_deref(), Some("100"));
+        let res_proj_a = eval_lisp_str_headless("(c:project_a)").unwrap();
+        assert_eq!(res_proj_a.as_deref(), Some("\"A_ONLY\""));
+
+        // 4. Close Tab A and verify cleanup leaves Tab B untouched
+        clean_tab_state(tab_a);
+        assert!(!has_lisp_command_for_tab(tab_a, "PROJECT_A"));
+        assert!(has_lisp_command_for_tab(tab_b, "PROJECT_B"));
+
+        clean_tab_state(tab_b);
+        crate::context::set_thread_tab_id(None);
     }
 }
 

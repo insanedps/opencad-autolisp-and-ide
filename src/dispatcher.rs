@@ -10,7 +10,30 @@ pub fn set_last_dispatched_command(cmd: Option<String>) {
     *LAST_DISPATCHED_COMMAND.lock().unwrap() = cmd;
 }
 
+pub fn parse_script_path_arg(rest: &str) -> &str {
+    let trimmed = rest.trim();
+    if trimmed.is_empty() {
+        return "";
+    }
+    if (trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2)
+        || (trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2)
+    {
+        return &trimmed[1..trimmed.len() - 1];
+    }
+    if let Some(stripped) = trimmed.strip_prefix('"') {
+        if let Some(end_quote) = stripped.find('"') {
+            return &stripped[..end_quote];
+        }
+    }
+    if std::path::Path::new(trimmed).is_file() {
+        return trimmed;
+    }
+    trimmed.split_whitespace().next().unwrap_or(trimmed)
+}
+
 pub fn dispatch_command(host: &mut dyn HostApi, cmd: &str) -> bool {
+    crate::rust_lisp::ensure_tab_initialized(host);
+    crate::rust_lisp::sync_pending_ide_scripts_for_tab(host);
     let mut trimmed = cmd.trim();
     if trimmed.is_empty() {
         return false;
@@ -61,16 +84,21 @@ pub fn dispatch_command(host: &mut dyn HostApi, cmd: &str) -> bool {
             true
         }
         "LSP" | "LISP" | "APPLOAD" => {
-            let (script_name, _args) = match rest.split_once(char::is_whitespace) {
-                Some((s, a)) => (s, a.split_whitespace().map(|x| x.to_string()).collect::<Vec<_>>()),
-                None => (rest, Vec::new()),
-            };
+            let script_name = parse_script_path_arg(rest);
             if script_name.is_empty() {
-                host.push_info("Usage: LSP <script_name_or_file> or APPLOAD <path>");
+                if primary == "APPLOAD" {
+                    host.start_interactive(Box::new(crate::appload::ApploadCommand::new()));
+                    return true;
+                }
+                host.push_info("Usage: LSP <script_name_or_file> or APPLOAD [<path>]");
                 return true;
             }
             set_last_dispatched_command(Some(trimmed.to_string()));
             crate::rust_lisp::load_lisp_file(script_name, host);
+            true
+        }
+        "STARTUP" | "STARTUPSCRIPTS" => {
+            host.start_interactive(Box::new(crate::appload::ApploadCommand::startup_only()));
             true
         }
         "OCAIDE" => {
@@ -81,7 +109,7 @@ pub fn dispatch_command(host: &mut dyn HostApi, cmd: &str) -> bool {
         "LSPLIST" | "LISPLIST" | "PYLIST" => {
             let scripts = crate::rust_lisp::list_lisp_scripts();
             let dir = crate::rust_lisp::scripts_dir();
-            let cmds = crate::rust_lisp::get_registered_lisp_commands();
+            let cmds = crate::rust_lisp::get_registered_lisp_commands_for_tab(host.tab_id());
 
             if !cmds.is_empty() {
                 host.push_info(&format!("Registered AutoLISP commands ({}):", cmds.len()));
@@ -139,8 +167,8 @@ pub fn dispatch_command(host: &mut dyn HostApi, cmd: &str) -> bool {
             true
         }
         _ => {
-            // Check if matches a registered AutoLISP command (from defun c:NAME)
-            if crate::rust_lisp::has_lisp_command(&primary) {
+            // Check if matches a registered AutoLISP command in the active drawing tab (from defun c:NAME)
+            if crate::rust_lisp::has_lisp_command_for_tab(host.tab_id(), &primary) {
                 let args: Vec<String> = if rest.is_empty() {
                     Vec::new()
                 } else {

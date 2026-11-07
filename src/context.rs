@@ -17,10 +17,29 @@ thread_local! {
     static WORKER_TX: RefCell<Option<std::sync::mpsc::Sender<WorkerMsg>>> = const { RefCell::new(None) };
     static SENDER: RefCell<Option<Arc<dyn ocs_plugin_api::host::PluginRequestSender>>> = const { RefCell::new(None) };
     static DEBUG_ACTIVE: RefCell<bool> = const { RefCell::new(false) };
+    static THREAD_TAB_ID: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
 static GLOBAL_SENDER: std::sync::Mutex<Option<Arc<dyn ocs_plugin_api::host::PluginRequestSender>>> =
     std::sync::Mutex::new(None);
+
+static ACTIVE_TAB_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn set_thread_tab_id(tab_id: Option<u64>) {
+    THREAD_TAB_ID.with(|cell| cell.set(tab_id));
+}
+
+pub fn set_active_tab_id(tab_id: u64) {
+    THREAD_TAB_ID.with(|cell| cell.set(Some(tab_id)));
+    ACTIVE_TAB_ID.store(tab_id, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn get_active_tab_id() -> u64 {
+    if let Some(tid) = THREAD_TAB_ID.with(|cell| cell.get()) {
+        return tid;
+    }
+    ACTIVE_TAB_ID.load(std::sync::atomic::Ordering::SeqCst)
+}
 
 pub fn set_global_sender(sender: Option<Arc<dyn ocs_plugin_api::host::PluginRequestSender>>) {
     *GLOBAL_SENDER.lock().unwrap() = sender;
@@ -69,6 +88,11 @@ pub struct HostGuard;
 
 impl HostGuard {
     pub fn new(host: &mut dyn HostApi) -> Self {
+        let tid = host.tab_id();
+        set_thread_tab_id(Some(tid));
+        if tid != 0 {
+            ACTIVE_TAB_ID.store(tid, std::sync::atomic::Ordering::SeqCst);
+        }
         ACTIVE_HOST.with(|cell| {
             let erased: *mut (dyn HostApi + 'static) =
                 unsafe { std::mem::transmute(host as *mut dyn HostApi) };
@@ -80,6 +104,7 @@ impl HostGuard {
 
 impl Drop for HostGuard {
     fn drop(&mut self) {
+        set_thread_tab_id(None);
         ACTIVE_HOST.with(|cell| {
             *cell.borrow_mut() = None;
         });

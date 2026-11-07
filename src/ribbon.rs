@@ -25,6 +25,18 @@ impl CadModule for AutoLispRibbonModule {
                         event: ModuleEvent::Command("OCAIDE".to_string()),
                     }),
                     RibbonItem::LargeTool(ToolDef {
+                        id: "APPLOAD",
+                        label: "Appload",
+                        icon: IconKind::Glyph("📥"),
+                        event: ModuleEvent::Command("APPLOAD".to_string()),
+                    }),
+                    RibbonItem::LargeTool(ToolDef {
+                        id: "STARTUP",
+                        label: "Startup",
+                        icon: IconKind::Glyph("⚡"),
+                        event: ModuleEvent::Command("STARTUP".to_string()),
+                    }),
+                    RibbonItem::LargeTool(ToolDef {
                         id: "LSPLIST",
                         label: "Scripts",
                         icon: IconKind::Glyph("λ"),

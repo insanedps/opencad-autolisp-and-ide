@@ -4,6 +4,7 @@ pub mod dispatcher;
 pub mod ribbon;
 pub mod ide;
 pub mod rust_lisp;
+pub mod appload;
 
 #[cfg(feature = "python")]
 #[path = "../archive/python_shelved/py_module.rs"]
@@ -61,10 +62,25 @@ impl BuiltinPlugin for AutoLispPlugin {
                 interactive::update_selection(u64s.clone());
                 ide::server::ide_selection_changed(u64s);
             }
-            HostNotification::SelectionChangedV4 { handles, .. } => {
+            HostNotification::SelectionChangedV4 { tab_id, handles } => {
+                context::set_active_tab_id(tab_id);
                 let u64s: Vec<u64> = handles.into_iter().map(|h| h.value()).collect();
                 interactive::update_selection(u64s.clone());
                 ide::server::ide_selection_changed(u64s);
+            }
+            HostNotification::DocumentOpened { tab_id } => {
+                rust_lisp::clean_tab_state(tab_id);
+                context::set_active_tab_id(tab_id);
+                let _ = rust_lisp::auto_load_lisp_scripts_headless();
+            }
+            HostNotification::DocumentTabClosed { tab_id } => {
+                rust_lisp::clean_tab_state(tab_id);
+            }
+            HostNotification::DocumentChangedV4 { tab_id, .. }
+            | HostNotification::CommandStateChanged { tab_id, .. }
+            | HostNotification::DrawingChanged { tab_id, .. }
+            | HostNotification::DocumentChangedRegions { tab_id, .. } => {
+                context::set_active_tab_id(tab_id);
             }
             HostNotification::PanelAction { panel_id, control_id, action, value } => {
                 rust_lisp::handle_panel_action(&panel_id, &control_id, &action, value.as_ref());
