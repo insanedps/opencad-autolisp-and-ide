@@ -8,6 +8,10 @@ pub enum InteractiveResponse {
     EntityPick { handle: u64, pt: [f64; 3] },
     Selection(Vec<u64>),
     Dialog(ocs_plugin_api::dialog::DialogResponse),
+    DialogAction {
+        event: ocs_plugin_api::dialog::DialogEvent,
+        resp_tx: Sender<ocs_plugin_api::dialog::DialogActionResponse>,
+    },
     Cancelled,
 }
 
@@ -204,6 +208,18 @@ impl InteractiveCoordinator {
 
     pub fn get_modal_dialog(&self) -> Option<ocs_plugin_api::dialog::DialogDef> {
         self.modal_dialog.lock().ok().and_then(|d| d.clone())
+    }
+
+    pub fn handle_dialog_action(&self, event: ocs_plugin_api::dialog::DialogEvent) -> ocs_plugin_api::dialog::DialogActionResponse {
+        if self.is_done() || self.get_error().is_some() {
+            return ocs_plugin_api::dialog::DialogActionResponse::None;
+        }
+        let (resp_tx, resp_rx) = channel();
+        let tx = self.tx.lock().unwrap_or_else(|e| e.into_inner());
+        if tx.send(InteractiveResponse::DialogAction { event, resp_tx }).is_err() {
+            return ocs_plugin_api::dialog::DialogActionResponse::None;
+        }
+        resp_rx.recv().unwrap_or(ocs_plugin_api::dialog::DialogActionResponse::None)
     }
 
     pub fn handle_dialog_response(&self, response: ocs_plugin_api::dialog::DialogResponse) -> CommandStep {
@@ -819,6 +835,9 @@ impl InteractiveCommand for CoordinatorProxy {
     fn modal_dialog(&self) -> Option<ocs_plugin_api::dialog::DialogDef> {
         self.0.get_modal_dialog()
     }
+    fn on_dialog_action(&mut self, event: ocs_plugin_api::dialog::DialogEvent) -> ocs_plugin_api::dialog::DialogActionResponse {
+        self.0.handle_dialog_action(event)
+    }
     fn on_dialog_response(&mut self, response: ocs_plugin_api::dialog::DialogResponse) -> CommandStep {
         self.0.handle_dialog_response(response)
     }
@@ -1077,19 +1096,36 @@ impl LispInteractiveBridge {
         res
     }
 
-    pub fn show_dialog(&self, dialog: ocs_plugin_api::dialog::DialogDef) -> ocs_plugin_api::dialog::DialogResponse {
+    pub fn show_dialog_interactive<F>(
+        &self,
+        dialog: ocs_plugin_api::dialog::DialogDef,
+        mut action_handler: F,
+    ) -> ocs_plugin_api::dialog::DialogResponse
+    where
+        F: FnMut(ocs_plugin_api::dialog::DialogEvent) -> ocs_plugin_api::dialog::DialogActionResponse,
+    {
         self.coordinator.set_modal_dialog(Some(dialog));
         self.check_advance_step();
 
         let debug_active = self.switch_focus_to_cad_for_input();
         let rx = self.rx.lock().unwrap_or_else(|e| e.into_inner());
-        let res = match rx.recv() {
-            Ok(InteractiveResponse::Dialog(resp)) => resp,
-            _ => ocs_plugin_api::dialog::DialogResponse::Cancelled,
+        let res = loop {
+            match rx.recv() {
+                Ok(InteractiveResponse::DialogAction { event, resp_tx }) => {
+                    let resp = action_handler(event);
+                    let _ = resp_tx.send(resp);
+                }
+                Ok(InteractiveResponse::Dialog(resp)) => break resp,
+                _ => break ocs_plugin_api::dialog::DialogResponse::Cancelled,
+            }
         };
         drop(rx);
         self.restore_focus_to_ide_after_input(debug_active);
         res
+    }
+
+    pub fn show_dialog(&self, dialog: ocs_plugin_api::dialog::DialogDef) -> ocs_plugin_api::dialog::DialogResponse {
+        self.show_dialog_interactive(dialog, |_| ocs_plugin_api::dialog::DialogActionResponse::None)
     }
 
     pub fn finish(&self) {

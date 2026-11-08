@@ -3030,6 +3030,37 @@ impl CadBridge for OpenCadRustBridge {
             .map_err(|e| format!("Failed to serialize dialog response: {e}"))
     }
 
+    fn show_dialog_interactive(
+        &mut self,
+        dialog_json: &str,
+        callback: &mut dyn FnMut(&str) -> Result<String, String>,
+    ) -> Result<String, String> {
+        let def: ocs_plugin_api::dialog::DialogDef = serde_json::from_str(dialog_json)
+            .map_err(|e| format!("Invalid dialog definition JSON: {e}"))?;
+
+        let bridge = if let Some(b) = crate::context::active_interactive() {
+            b
+        } else {
+            crate::context::ensure_interactive_dialog(&def.title, def.clone())?
+        };
+
+        let response = bridge.show_dialog_interactive(def, |event| {
+            let evt_json = match serde_json::to_string(&event) {
+                Ok(s) => s,
+                Err(_) => return ocs_plugin_api::dialog::DialogActionResponse::None,
+            };
+            match callback(&evt_json) {
+                Ok(resp_json) => {
+                    serde_json::from_str(&resp_json).unwrap_or(ocs_plugin_api::dialog::DialogActionResponse::None)
+                }
+                Err(_) => ocs_plugin_api::dialog::DialogActionResponse::None,
+            }
+        });
+
+        serde_json::to_string(&response)
+            .map_err(|e| format!("Failed to serialize dialog response: {e}"))
+    }
+
     fn register_panel(&mut self, panel_json: &str) -> Result<bool, String> {
         let def: ocs_plugin_api::dialog::PanelDef = serde_json::from_str(panel_json)
             .map_err(|e| format!("Invalid panel definition JSON: {e}"))?;
