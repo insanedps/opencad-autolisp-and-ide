@@ -1415,252 +1415,379 @@ pub const API_DOCS: &[ApiDoc] = &[
         dxf_summary: None,
     },
 
-    // ── 13. OpenCAD Native UI Dialogs & Panels (ocl-*) ──────────────────────
+    // ── 13. OpenCAD Native UI Dialogs & Panels (oca-*) ──────────────────────
     ApiDoc {
-        name: "ocl-dialog",
-        signature: "(ocl-dialog title [options-alist] ctrl1 [ctrl2 ...]) -> dialog-def",
-        description: "Constructs a modal dialog definition with interactive controls.",
-        snippet: "(setq dlg (ocl-dialog \"Parameters\"\n  (ocl-number \"rad\" \"Radius\" 25.0)\n  (ocl-checkbox \"draw_x\" \"Draw X\" nil)\n))\n",
+        name: "oca-dialog",
+        signature: "(oca-dialog title [options] row1 [row2 ...]) -> dialog-def",
+        description: "Constructs a modal dialog definition with interactive controls. Parameters:
+- title (string): Dialog window title
+- [options] (optional alist): '((width . 400.0) (submit . \"OK\") (cancel . \"Cancel\"))
+- row1 [row2 ...] (controls): One or more rows, columns, or controls",
+        snippet: "(setq dlg (oca-dialog \"Parameters\"
+  '((width . 400.0))
+  (oca-row (oca-number \"rad\" \"Radius\" 25.0 '((min . 1.0) (max . 100.0))))
+  (oca-row (oca-checkbox \"draw_x\" \"Draw X\" nil))
+))
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-dialog-show",
-        signature: "(ocl-dialog-show dialog-def) -> alist | nil",
-        description: "Displays a dialog modally and returns an alist of (id . value) pairs if OK is clicked, or nil on Cancel.",
-        snippet: "(setq res (ocl-dialog-show dlg))\n(if res\n  (princ (ocl-get-real \"rad\" res))\n)\n",
+        name: "oca-dialog-show",
+        signature: "(oca-dialog-show dialog-def [action_callback]) -> alist | nil",
+        description: "Displays a dialog modally and returns an alist of (id . value) pairs if submitted, or nil on Cancel. Parameters:
+- dialog-def: Dialog object from oca-dialog
+- [action_callback] (optional symbol or lambda): (callback control-id action current-values) for two-way reactive interactivity without closing",
+        snippet: "(setq res (oca-dialog-show dlg))
+(if res
+  (princ (oca-get-real \"rad\" res))
+)
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-get",
-        signature: "(ocl-get key-str alist) -> value",
-        description: "Retrieves raw control value by key from the result alist returned by ocl-dialog-show.",
-        snippet: "(setq v (ocl-get \"rad\" res))\n",
+        name: "oca-get",
+        signature: "(oca-get key-str alist) -> value",
+        description: "Retrieves raw control value by key from the result alist returned by oca-dialog-show. Parameters:
+- key-str (string | symbol): Control ID key
+- alist: Association list returned by oca-dialog-show",
+        snippet: "(setq v (oca-get \"rad\" res))
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-get-real",
-        signature: "(ocl-get-real key-str alist) -> real",
-        description: "Retrieves a numeric floating-point value by key from dialog results.",
-        snippet: "(setq r (ocl-get-real \"rad\" res))\n",
+        name: "oca-get-real",
+        signature: "(oca-get-real key-str alist) -> real",
+        description: "Retrieves a numeric floating-point value by key from dialog results. Parameters:
+- key-str (string | symbol): Control ID key
+- alist: Association list returned by oca-dialog-show",
+        snippet: "(setq r (oca-get-real \"rad\" res))
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-get-str",
-        signature: "(ocl-get-str key-str alist) -> string",
-        description: "Retrieves a text string value by key from dialog results.",
-        snippet: "(setq s (ocl-get-str \"label\" res))\n",
+        name: "oca-get-str",
+        signature: "(oca-get-str key-str alist) -> string",
+        description: "Retrieves a text string value by key from dialog results. Parameters:
+- key-str (string | symbol): Control ID key
+- alist: Association list returned by oca-dialog-show",
+        snippet: "(setq s (oca-get-str \"label\" res))
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-get-bool",
-        signature: "(ocl-get-bool key-str alist) -> boolean",
-        description: "Retrieves a boolean flag (T or nil) by key from dialog results.",
-        snippet: "(setq b (ocl-get-bool \"draw_x\" res))\n",
+        name: "oca-get-bool",
+        signature: "(oca-get-bool key-str alist) -> boolean",
+        description: "Retrieves a boolean flag (T or nil) by key from dialog results. Parameters:
+- key-str (string | symbol): Control ID key
+- alist: Association list returned by oca-dialog-show",
+        snippet: "(setq b (oca-get-bool \"draw_x\" res))
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-get-int",
-        signature: "(ocl-get-int key-str alist) -> integer",
-        description: "Retrieves an integer value by key from dialog results.",
-        snippet: "(setq n (ocl-get-int \"count\" res))\n",
+        name: "oca-get-int",
+        signature: "(oca-get-int key-str alist) -> integer",
+        description: "Retrieves an integer value by key from dialog results. Parameters:
+- key-str (string | symbol): Control ID key
+- alist: Association list returned by oca-dialog-show",
+        snippet: "(setq n (oca-get-int \"count\" res))
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-panel-register",
-        signature: "(ocl-panel-register panel-id title [options-alist] ctrl1 [ctrl2 ...]) -> nil",
-        description: "Registers a persistent dockable side panel in OpenCAD Studio.",
-        snippet: "(ocl-panel-register \"my_panel\" \"Tools\"\n  '((width . 260.0))\n  (ocl-choice \"col\" \"Color\" '(\"Red\" \"Blue\") \"Red\")\n  (ocl-button \"btn\" \"Execute\" \"(c:run)\")\n)\n",
+        name: "oca-panel-register",
+        signature: "(oca-panel-register panel-id title [options] ctrl1 [ctrl2 ...]) -> boolean",
+        description: "Registers a persistent dockable side panel in OpenCAD Studio. Parameters:
+- panel-id (string | symbol): Unique panel ID
+- title (string | symbol): Header title on panel tab
+- [options] (optional alist): '((width . 260.0) (command . \"MYCMD\"))
+- ctrl1 [ctrl2 ...] (controls): Controls placed vertically in panel",
+        snippet: "(oca-panel-register \"my_panel\" \"Tools\"
+  '((width . 260.0))
+  (oca-choice \"col\" \"Color\" '(\"Red\" \"Blue\") \"Red\")
+  (oca-button \"btn\" \"Execute\" \"(c:run)\")
+)
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-panel-toggle",
-        signature: "(ocl-panel-toggle panel-id [show-bool]) -> nil",
-        description: "Toggles or sets visibility of a registered dockable side panel.",
-        snippet: "(ocl-panel-toggle \"my_panel\" T)\n",
+        name: "oca-panel-toggle",
+        signature: "(oca-panel-toggle panel-id [show-bool]) -> boolean",
+        description: "Toggles or sets visibility of a registered dockable side panel. Parameters:
+- panel-id (string | symbol): Identifier of registered panel
+- [show-bool] (optional boolean): T to show, nil to hide; toggles if omitted",
+        snippet: "(oca-panel-toggle \"my_panel\" T)
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-panel-update",
-        signature: "(ocl-panel-update panel-id values-alist) -> nil",
-        description: "Updates control values in a live dockable side panel without re-registering.",
-        snippet: "(ocl-panel-update \"my_panel\" (list (cons \"col\" \"Blue\")))\n",
+        name: "oca-panel-update",
+        signature: "(oca-panel-update panel-id values-alist) -> boolean",
+        description: "Updates control values in a live dockable side panel without re-registering. Parameters:
+- panel-id (string | symbol): Identifier of registered panel
+- values-alist: Alist of ((\"control_id\" . new-value) ...)",
+        snippet: "(oca-panel-update \"my_panel\" (list (cons \"col\" \"Blue\")))
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-panel",
-        signature: "(ocl-panel panel-id title [opts-alist] ctrl1 [ctrl2 ...]) -> panel-def",
-        description: "Constructs a dockable tool palette panel definition containing controls.",
-        snippet: "(setq p (ocl-panel \"my_tool\" \"My Tool\"\n  (ocl-number \"rad\" \"Radius\" 10.0)\n  (ocl-button \"btn\" \"Execute\" \"C:RUN\")\n))\n(ocl-panel-register p)\n",
+        name: "oca-panel-get",
+        signature: "(oca-panel-get panel-id control-id) -> value",
+        description: "Reads the current live value of a control inside a dockable side panel. Parameters:
+- panel-id (string | symbol): Side panel ID
+- control-id (string | symbol): Control ID inside panel",
+        snippet: "(setq val (oca-panel-get \"my_panel\" \"col\"))
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-panel-get",
-        signature: "(ocl-panel-get panel-id control-id) -> value",
-        description: "Reads the current live value of a control inside a dockable side panel.",
-        snippet: "(setq val (ocl-panel-get \"my_panel\" \"col\"))\n",
+        name: "oca-panel-get-num",
+        signature: "(oca-panel-get-num panel-id control-id) -> real",
+        description: "Reads the current numeric value of a control inside a dockable side panel. Parameters:
+- panel-id (string | symbol): Side panel ID
+- control-id (string | symbol): Numeric control ID inside panel",
+        snippet: "(setq n (oca-panel-get-num \"my_panel\" \"radius\"))
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-panel-get-num",
-        signature: "(ocl-panel-get-num panel-id control-id) -> real",
-        description: "Reads the current numeric value of a control inside a dockable side panel.",
-        snippet: "(setq n (ocl-panel-get-num \"my_panel\" \"radius\"))\n",
+        name: "oca-panel-get-real",
+        signature: "(oca-panel-get-real panel-id control-id) -> real",
+        description: "Reads the current real numeric value of a control inside a dockable side panel (alias of oca-panel-get-num). Parameters:
+- panel-id (string | symbol): Side panel ID
+- control-id (string | symbol): Numeric control ID inside panel",
+        snippet: "(setq r (oca-panel-get-real \"my_panel\" \"radius\"))
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-panel-get-real",
-        signature: "(ocl-panel-get-real panel-id control-id) -> real",
-        description: "Reads the current real numeric value of a control inside a dockable side panel (alias of ocl-panel-get-num).",
-        snippet: "(setq r (ocl-panel-get-real \"my_panel\" \"radius\"))\n",
+        name: "oca-panel-get-str",
+        signature: "(oca-panel-get-str panel-id control-id) -> string",
+        description: "Reads the current string or selected choice text of a control inside a dockable side panel. Parameters:
+- panel-id (string | symbol): Side panel ID
+- control-id (string | symbol): Control ID inside panel",
+        snippet: "(setq s (oca-panel-get-str \"my_panel\" \"color\"))
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-panel-get-str",
-        signature: "(ocl-panel-get-str panel-id control-id) -> string",
-        description: "Reads the current string or selected choice text of a control inside a dockable side panel.",
-        snippet: "(setq s (ocl-panel-get-str \"my_panel\" \"color\"))\n",
+        name: "oca-panel-get-bool",
+        signature: "(oca-panel-get-bool panel-id control-id) -> boolean",
+        description: "Reads the current boolean checkbox state (T or nil) of a control inside a dockable side panel. Parameters:
+- panel-id (string | symbol): Side panel ID
+- control-id (string | symbol): Checkbox control ID inside panel",
+        snippet: "(if (oca-panel-get-bool \"my_panel\" \"chk_close\") (princ \"Closed\"))
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-panel-get-bool",
-        signature: "(ocl-panel-get-bool panel-id control-id) -> boolean",
-        description: "Reads the current boolean checkbox state (T or nil) of a control inside a dockable side panel.",
-        snippet: "(if (ocl-panel-get-bool \"my_panel\" \"chk_close\") (princ \"Closed\"))\n",
+        name: "oca-row",
+        signature: "(oca-row [options] ctrl1 [ctrl2 ...]) -> row-def",
+        description: "Groups multiple controls horizontally in a single row within a dialog. Parameters:
+- [options] (optional alist): '((align-h . \"left\"|\"center\"|\"right\") (align-v . \"top\"|\"middle\"|\"bottom\"))
+- ctrl1 [ctrl2 ...] (controls): Child controls in row",
+        snippet: "(oca-row '((align-h . \"center\") (align-v . \"middle\"))
+  (oca-number \"w\" \"Width\" 10.0)
+  (oca-number \"h\" \"Height\" 20.0)
+)
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-row",
-        signature: "(ocl-row [opts-alist] ctrl1 [ctrl2 ...]) -> row-def",
-        description: "Groups multiple controls horizontally in a single row within a dialog. Options: align-h (\"left\", \"center\", \"right\"), align-v (\"top\", \"middle\", \"bottom\").",
-        snippet: "(ocl-row '((align-h . \"center\") (align-v . \"middle\"))\n  (ocl-number \"w\" \"Width\" 10.0)\n  (ocl-number \"h\" \"Height\" 20.0)\n)\n",
+        name: "oca-column",
+        signature: "(oca-column [options] ctrl1 [ctrl2 ...]) -> control-def",
+        description: "Groups multiple controls vertically in a single column container. Parameters:
+- [options] (optional alist): '((align-h . \"left\"|\"center\"|\"right\") (align-v . \"top\"|\"middle\"|\"bottom\"))
+- ctrl1 [ctrl2 ...] (controls): Stacked child controls",
+        snippet: "(oca-column '((align-h . \"center\") (align-v . \"top\"))
+  (oca-text \"txt1\" \"Label\" \"Val\")
+  (oca-button \"btn1\" \"Submit\")
+)
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-column",
-        signature: "(ocl-column [opts-alist] ctrl1 [ctrl2 ...]) -> control-def",
-        description: "Groups multiple controls vertically in a single column within a dialog or panel. Options: align-h (\"left\", \"center\", \"right\"), align-v (\"top\", \"middle\", \"bottom\").",
-        snippet: "(ocl-column '((align-h . \"center\") (align-v . \"top\"))\n  (ocl-text \"txt1\" \"Label\" \"Val\")\n  (ocl-button \"btn1\" \"Submit\")\n)\n",
+        name: "oca-text",
+        signature: "(oca-text id-str label-str [default-str]) -> control-def",
+        description: "UI Control: Creates a single-line text input field. Parameters:
+- id-str (string | symbol): Control ID
+- label-str (string | symbol): Field label
+- [default-str] (optional string, default \"\"): Initial text value",
+        snippet: "(oca-text \"txt_name\" \"Name\" \"Part-1\")
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-text",
-        signature: "(ocl-text id-str label-str [default-str]) -> control-def",
-        description: "UI Control: Creates a single-line text input field.",
-        snippet: "(ocl-text \"txt_name\" \"Name\" \"Part-1\")\n",
+        name: "oca-number",
+        signature: "(oca-number id-str label-str [default-num] [options]) -> control-def",
+        description: "UI Control: Creates a numeric input field with spinner constraints. Parameters:
+- id-str (string | symbol): Control ID
+- label-str (string | symbol): Field label
+- [default-num] (optional number or alist, default 0.0): Initial value or options alist
+- [options] (optional alist): '((min . 0.0) (max . 100.0) (step . 1.0) (default . 0.0))",
+        snippet: "(oca-number \"rad\" \"Radius\" 25.0 '((min . 1.0) (max . 100.0) (step . 0.5)))
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-number",
-        signature: "(ocl-number id-str label-str [default-num] [opts-alist]) -> control-def",
-        description: "UI Control: Creates a numeric input field with optional min/max/step options.",
-        snippet: "(ocl-number \"rad\" \"Radius\" 25.0 '((min . 1.0) (max . 100.0)))\n",
+        name: "oca-checkbox",
+        signature: "(oca-checkbox id-str label-str [default-bool] [options]) -> control-def",
+        description: "UI Control: Creates a boolean checkbox toggle. Parameters:
+- id-str (string | symbol): Control ID
+- label-str (string | symbol): Field label
+- [default-bool] (optional boolean, default nil): Initial state (T or nil)
+- [options] (optional alist): '((align-h . \"left\"|\"center\"|\"right\") (align-v . \"top\"|\"middle\"|\"bottom\"))",
+        snippet: "(oca-checkbox \"chk_close\" \"Close Shape\" T)
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-checkbox",
-        signature: "(ocl-checkbox id-str label-str [default-bool]) -> control-def",
-        description: "UI Control: Creates a boolean checkbox toggle.",
-        snippet: "(ocl-checkbox \"chk_close\" \"Close Shape\" T)\n",
+        name: "oca-choice",
+        signature: "(oca-choice id-str label-str options-list [default-choice]) -> control-def",
+        description: "UI Control: Creates a dropdown selector menu. Parameters:
+- id-str (string | symbol): Control ID
+- label-str (string | symbol): Field label
+- options-list (list of strings): Dropdown items list
+- [default-choice] (optional int, string, or alist, default 0): 0-based index, string match, or '((default . 0))",
+        snippet: "(oca-choice \"cmb_layer\" \"Layer\" '(\"0\" \"WALLS\" \"DIMS\") \"0\")
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-choice",
-        signature: "(ocl-choice id-str label-str options-list [default-str]) -> control-def",
-        description: "UI Control: Creates a dropdown selector from a list of strings.",
-        snippet: "(ocl-choice \"cmb_layer\" \"Layer\" '(\"0\" \"WALLS\" \"DIMS\") \"0\")\n",
+        name: "oca-color",
+        signature: "(oca-color id-str label-str [default-rgb]) -> control-def",
+        description: "UI Control: Creates an RGB color picker. Parameters:
+- id-str (string | symbol): Control ID
+- label-str (string | symbol): Field label
+- [default-rgb] (optional list of 3 ints, default '(0 0 0)): RGB values (0..255)",
+        snippet: "(oca-color \"clr\" \"Color\" '(255 0 0))
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-color",
-        signature: "(ocl-color id-str label-str [default-rgb-list]) -> control-def",
-        description: "UI Control: Creates an RGB color picker (values 0..255).",
-        snippet: "(ocl-color \"clr\" \"Color\" '(255 0 0))\n",
+        name: "oca-file",
+        signature: "(oca-file id-str label-str [default-path] [options]) -> control-def",
+        description: "UI Control: Creates a native file open/save browser control. Parameters:
+- id-str (string | symbol): Control ID
+- label-str (string | symbol): Field label
+- [default-path] (optional string, default \"\"): Initial path
+- [options] (optional alist): '((filter . \"DXF Files (*.dxf)\") (extensions . (\"dxf\")) (save . T|nil))",
+        snippet: "(oca-file \"out_file\" \"DXF File\" \"output.dxf\" '((filter . \"DXF Files (*.dxf)\") (extensions . (\"dxf\")) (save . T)))
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-file",
-        signature: "(ocl-file id-str label-str [default-path] [opts-alist]) -> control-def",
-        description: "UI Control: Creates a file picker input with browse button. Supports filter and save mode.",
-        snippet: "(ocl-file \"out_file\" \"DXF File\" \"output.dxf\" '((filter . \"DXF Files (*.dxf)\") (ext . \"dxf\")))\n",
+        name: "oca-table",
+        signature: "(oca-table id-str label-str headers-list [rows-list] [options]) -> control-def",
+        description: "UI Control: Creates an interactive data table grid with row add/remove buttons. Parameters:
+- id-str (string | symbol): Control ID
+- label-str (string | symbol): Table title
+- headers-list (list of strings): Column header titles
+- [rows-list] (optional list of row lists): Initial 2D table data
+- [options] (optional alist): '((allow_add . T|nil) (allow_delete . T|nil))",
+        snippet: "(oca-table \"tbl_pts\" \"Coordinates\" '(\"X\" \"Y\" \"Z\") '((\"0.0\" \"0.0\" \"0.0\")) '((allow_add . T) (allow_delete . T)))
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-table",
-        signature: "(ocl-table id-str label-str columns-list [rows-list] [opts-alist]) -> control-def",
-        description: "UI Control: Creates an interactive data table grid with add/delete row buttons.",
-        snippet: "(ocl-table \"tbl_pts\" \"Coordinates\" '(\"X\" \"Y\" \"Z\") '((\"0.0\" \"0.0\" \"0.0\")))\n",
+        name: "oca-fields",
+        signature: "(oca-fields [id-str] title-str [options] ctrl1 [ctrl2 ...]) -> control-def",
+        description: "UI Control: Creates a collapsible property group box. Parameters:
+- [id-str] (optional string | symbol): Section ID
+- title-str (string | symbol): Header title on group box
+- [options] (optional alist): '((collapsed . T|nil))
+- ctrl1 [ctrl2 ...] (controls): Nested controls",
+        snippet: "(oca-fields \"Geometry\"
+  '((collapsed . nil))
+  (oca-number \"len\" \"Length\" 50.0)
+  (oca-number \"wid\" \"Width\" 30.0)
+)
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-fields",
-        signature: "(ocl-fields [id-str] title-str [opts-alist] ctrl1 [ctrl2 ...]) -> control-def",
-        description: "UI Control: Creates a collapsible two-column property group for organized layout.",
-        snippet: "(ocl-fields \"Geometry\"\n  (ocl-number \"len\" \"Length\" 50.0)\n  (ocl-number \"wid\" \"Width\" 30.0)\n)\n",
+        name: "oca-button",
+        signature: "(oca-button id-str label-str [action] [options]) -> control-def",
+        description: "UI Control: Creates a clickable button. Parameters:
+- id-str (string | symbol): Control ID
+- label-str (string | symbol): Button text
+- [action] (optional string or alist, default \"click\"): Command string in panels; action ID in dialogs
+- [options] (optional alist): '((action . \"...\") (align-h . \"left\"|\"center\"|\"right\") (width . 140.0))",
+        snippet: "(oca-button \"btn_draw\" \"Draw Shape\" \"(c:draw-shape)\" '((align-h . \"center\") (width . 140.0)))
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-button",
-        signature: "(ocl-button id-str label-str [action-or-opts] [opts-alist]) -> control-def",
-        description: "UI Control: Creates a clickable button. In panels, action-lisp-str is executed on click. Options: align-h (\"left\", \"center\", \"right\"), width (number).",
-        snippet: "(ocl-button \"btn_draw\" \"Draw Shape\" \"(c:draw-shape)\" '((align-h . \"center\") (width . 120.0)))\n",
-        category: "UI & Panels",
-        dxf_summary: None,
-    },
-    ApiDoc {
-        name: "ocl-info",
-        signature: "(ocl-info text-str [opts-alist]) -> control-def",
-        description: "UI Control: Displays read-only instructional or descriptive text. Options: align-h (\"left\", \"center\", \"right\").",
-        snippet: "(ocl-info \"Specify dimensions in millimeters below:\" '((align-h . \"center\")))\n",
+        name: "oca-info",
+        signature: "(oca-info [id-str] text-str [options]) -> control-def",
+        description: "UI Control: Displays read-only instructional or descriptive text. Parameters:
+- [id-str] (optional string | symbol): Optional control ID for live updates
+- text-str (string | symbol): Label text
+- [options] (optional alist): '((align-h . \"left\"|\"center\"|\"right\"))",
+        snippet: "(oca-info \"Specify dimensions in millimeters below:\" '((align-h . \"center\")))
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
         name: "msgbox",
         signature: "(msgbox prompt-str [title-str] [buttons-spec]) -> button-id",
-        description: "Displays a native message box dialog. buttons: \"OK\", \"OKCANCEL\", \"YESNO\", \"RETRYCANCEL\". Returns 1=OK, 2=Cancel, 6=Yes, 7=No.",
-        snippet: "(if (= 6 (msgbox \"Delete entity?\" \"Confirm\" \"YESNO\")) (entdel ent))\n",
+        description: "Displays a native message box dialog. Parameters:
+- prompt-str (string | any): Dialog message text
+- [title-str] (optional string, default \"OpenCAD Studio\"): Title bar text
+- [buttons-spec] (optional int, symbol, or alist): \"OK\", \"OKCANCEL\", \"YESNO\", \"RETRYCANCEL\", \"ABORTRETRYIGNORE\", \"YESNOCANCEL\". Returns: 1=OK, 2=Cancel, 3=Abort, 4=Retry, 5=Ignore, 6=Yes, 7=No",
+        snippet: "(if (= 6 (msgbox \"Delete entity?\" \"Confirm\" \"YESNO\")) (entdel ent))
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
         name: "dos_msgbox",
         signature: "(dos_msgbox prompt-str [title-str] [buttons-spec]) -> button-id",
-        description: "Displays a native message box dialog (alias of msgbox).",
-        snippet: "(dos_msgbox \"Operation complete\" \"Info\" \"OK\")\n",
+        description: "Displays a native message box dialog (alias of msgbox). Parameters:
+- prompt-str (string | any): Dialog message text
+- [title-str] (optional string): Title bar text
+- [buttons-spec] (optional int, symbol, or alist): Button style specifier",
+        snippet: "(dos_msgbox \"Operation complete\" \"Info\" \"OK\")
+",
         category: "UI & Panels",
         dxf_summary: None,
     },
     ApiDoc {
-        name: "ocl-msgbox",
-        signature: "(ocl-msgbox prompt-str [title-str] [buttons-spec]) -> button-id",
-        description: "Displays a native message box dialog with prompt, title, and buttons (\"OK\", \"OKCANCEL\", \"YESNO\", \"RETRYCANCEL\").",
-        snippet: "(if (= 6 (ocl-msgbox \"Proceed?\" \"Notice\" \"YESNO\")) (princ \"Confirmed\"))\n",
+        name: "oca-msgbox",
+        signature: "(oca-msgbox prompt-str [title-str] [buttons-spec]) -> button-id",
+        description: "Displays a native message box dialog. Parameters:
+- prompt-str (string | any): Dialog message text
+- [title-str] (optional string, default \"OpenCAD Studio\"): Title bar text
+- [buttons-spec] (optional int, symbol, or alist): \"OK\", \"OKCANCEL\", \"YESNO\", \"RETRYCANCEL\", \"ABORTRETRYIGNORE\", \"YESNOCANCEL\", or alist '((buttons . yesno) (title . \"...\") (icon . warning)). Returns: 1=OK, 2=Cancel, 3=Abort, 4=Retry, 5=Ignore, 6=Yes, 7=No",
+        snippet: "(if (= 6 (oca-msgbox \"Proceed?\" \"Notice\" \"YESNO\")) (princ \"Confirmed\"))
+",
         category: "UI & Panels",
         dxf_summary: None,
     },

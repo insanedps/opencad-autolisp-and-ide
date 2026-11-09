@@ -4629,10 +4629,10 @@ mod tests {
     #[test]
     fn test_rust_lisp_shape_panel_state_and_get() {
         let code = r#"
-            (ocl-panel-register "shape_panel" "Shape Generator"
-                (ocl-choice "shape_color" "Color" '("Red" "Blue" "Green") "Red")
-                (ocl-checkbox "shape_draw_x" "Draw X Lines" nil)
-                (ocl-button "btn_draw" "Draw Circle" "(c:draw-shape)")
+            (oca-panel-register "shape_panel" "Shape Generator"
+                (oca-choice "shape_color" "Color" '("Red" "Blue" "Green") "Red")
+                (oca-checkbox "shape_draw_x" "Draw X Lines" nil)
+                (oca-button "btn_draw" "Draw Circle" "(c:draw-shape)")
             )
         "#;
         let (tx, rx) = std::sync::mpsc::channel();
@@ -4649,7 +4649,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let (worker_tx, _) = std::sync::mpsc::channel();
         let _ = get_task_tx().send(LispTask::Eval {
-            code: r#"(list (ocl-panel-get "shape_panel" "shape_color") (ocl-panel-get "shape_panel" "shape_draw_x"))"#.to_string(),
+            code: r#"(list (oca-panel-get "shape_panel" "shape_color") (oca-panel-get "shape_panel" "shape_draw_x"))"#.to_string(),
             resp: tx,
             worker_tx,
         });
@@ -4665,7 +4665,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let (worker_tx, _) = std::sync::mpsc::channel();
         let _ = get_task_tx().send(LispTask::Eval {
-            code: r#"(list (ocl-panel-get "shape_panel" "shape_color") (ocl-panel-get "shape_panel" "shape_draw_x"))"#.to_string(),
+            code: r#"(list (oca-panel-get "shape_panel" "shape_color") (oca-panel-get "shape_panel" "shape_draw_x"))"#.to_string(),
             resp: tx,
             worker_tx,
         });
@@ -5492,5 +5492,6 @@ mod tests {
         crate::context::set_thread_tab_id(None);
     }
 }
+
 
 

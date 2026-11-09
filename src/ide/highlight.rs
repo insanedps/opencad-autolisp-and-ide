@@ -684,7 +684,7 @@ pub fn is_lisp_builtin(ident: &str) -> bool {
         || lower.starts_with("vla-")
         || lower.starts_with("dos_")
         || lower.starts_with("cad:")
-        || lower.starts_with("ocl-")
+        || lower.starts_with("oca-")
     {
         return true;
     }
@@ -1168,3 +1168,4 @@ mod tests {
         );
     }
 }
+
