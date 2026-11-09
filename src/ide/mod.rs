@@ -528,7 +528,7 @@ pub fn compute_search_matches(
         String::new()
     };
 
-    let is_word_char = |c: char| c.is_alphanumeric() || c == '_';
+    let is_word_char = |c: char| crate::ide::api_docs::is_lisp_ident_char(c);
 
     for (line_idx, line) in text.split('\n').enumerate() {
         let line_trimmed = line.strip_suffix('\r').unwrap_or(line);
@@ -780,6 +780,56 @@ impl IdeTab {
                 column: cursor_col,
             },
             selection: None,
+        });
+        self.last_edit_cursor = Some(self.content.cursor());
+        self.is_scrolling_away = false;
+    }
+
+    /// Positions viewport scroll at target_top_line, places cursor at (cursor_line, cursor_col),
+    /// and selects text back to selection_start_col on cursor_line.
+    pub fn scroll_to_selection_exact(
+        &mut self,
+        target_top_line: usize,
+        cursor_line: usize,
+        cursor_col: usize,
+        selection_start_col: usize,
+        visible_lines: usize,
+    ) {
+        let total = self.content.line_count().max(1);
+        let max_scroll = total.saturating_sub(visible_lines.max(1));
+        let target_top = target_top_line.min(max_scroll);
+
+        if total > visible_lines && target_top > 0 {
+            self.content.perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+        } else {
+            self.content.perform(text_editor::Action::Move(text_editor::Motion::DocumentStart));
+            self.content.perform(text_editor::Action::Scroll { lines: -100_000 });
+        }
+
+        self.content.move_to(text_editor::Cursor {
+            position: text_editor::Position {
+                line: target_top,
+                column: 0,
+            },
+            selection: None,
+        });
+
+        self.content.perform(text_editor::Action::Scroll { lines: 0 });
+        self.scroll_top_line = target_top;
+
+        let clamped_line = cursor_line.clamp(
+            target_top,
+            (target_top + visible_lines.saturating_sub(1)).min(total.saturating_sub(1)),
+        );
+        self.content.move_to(text_editor::Cursor {
+            position: text_editor::Position {
+                line: clamped_line,
+                column: cursor_col,
+            },
+            selection: Some(text_editor::Position {
+                line: clamped_line,
+                column: selection_start_col,
+            }),
         });
         self.last_edit_cursor = Some(self.content.cursor());
         self.is_scrolling_away = false;

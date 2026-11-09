@@ -111,7 +111,7 @@ impl IdeApp {
             let visible_lines = self.visible_lines();
             if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                 let target_top = m.line.saturating_sub(visible_lines / 3);
-                tab.scroll_to_line_exact(target_top, m.line, m.col + m.len, visible_lines);
+                tab.scroll_to_selection_exact(target_top, m.line, m.col + m.len, m.col, visible_lines);
                 tab.is_scrolling_away = false;
             }
         }
@@ -689,6 +689,7 @@ impl IdeApp {
                         file: tab.title.clone(),
                         breakpoints: bps,
                     });
+                    self.refresh_find_matches();
                 }
                 Task::none()
             }
@@ -2457,8 +2458,35 @@ impl IdeApp {
                 return iced::widget::operation::focus(crate::ide::view::FIND_INPUT_ID);
             }
             IdeMessage::OpenReplace => {
+                self.find_replace.is_open = true;
                 self.find_replace.show_replace = true;
-                return self.update(IdeMessage::OpenFind);
+                if let Some(tab) = self.tabs.get(self.active_tab) {
+                    if let Some(sel) = tab.content.selection() {
+                        let trimmed = sel.trim();
+                        if !trimmed.is_empty() && !trimmed.contains('\n') {
+                            self.find_replace.find_query = trimmed.to_string();
+                        }
+                    } else if self.find_replace.find_query.is_empty() {
+                        let cursor = tab.content.cursor();
+                        if let Some(ident) = identifier_at_cursor(&tab.content.text(), cursor.position.line, cursor.position.column) {
+                            self.find_replace.find_query = ident;
+                        }
+                    }
+                }
+                self.refresh_find_matches();
+                if !self.find_replace.matches.is_empty() {
+                    let cursor_line = self.tabs.get(self.active_tab).map_or(0, |t| t.content.cursor().position.line);
+                    let target_idx = self.find_replace.matches
+                        .iter()
+                        .position(|m| m.line >= cursor_line)
+                        .unwrap_or(0);
+                    self.navigate_to_search_match(target_idx);
+                }
+                if self.find_replace.find_query.is_empty() {
+                    return iced::widget::operation::focus(crate::ide::view::FIND_INPUT_ID);
+                } else {
+                    return iced::widget::operation::focus(crate::ide::view::REPLACE_INPUT_ID);
+                }
             }
             IdeMessage::CloseFind => {
                 self.find_replace.is_open = false;
@@ -2499,6 +2527,9 @@ impl IdeApp {
             }
             IdeMessage::ToggleFindShowReplace => {
                 self.find_replace.show_replace = !self.find_replace.show_replace;
+                if self.find_replace.show_replace {
+                    return iced::widget::operation::focus(crate::ide::view::REPLACE_INPUT_ID);
+                }
                 Task::none()
             }
             IdeMessage::FindNext => {
@@ -2523,6 +2554,7 @@ impl IdeApp {
                 Task::none()
             }
             IdeMessage::ReplaceCurrent => {
+                let mut next_target_pos = None;
                 if let Some(curr_idx) = self.find_replace.current_match_idx {
                     if let Some(m) = self.find_replace.matches.get(curr_idx).cloned() {
                         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
@@ -2538,15 +2570,40 @@ impl IdeApp {
                                     new_line.push_str(&line_str[m.col + m.len..]);
                                     lines[m.line] = new_line;
                                     let new_text = lines.join("\n");
+                                    let saved_scroll = tab.scroll_top_line;
                                     tab.content = text_editor::Content::with_text(&new_text);
                                     tab.dirty = true;
+                                    tab.scroll_top_line = saved_scroll;
+
+                                    let after_replace_col = m.col + self.find_replace.replace_query.len();
+                                    next_target_pos = Some((m.line, after_replace_col));
                                 }
                             }
                         }
                         self.refresh_find_matches();
                         if !self.find_replace.matches.is_empty() {
-                            let next_idx = curr_idx.min(self.find_replace.matches.len() - 1);
+                            // Find the first match that is strictly at or after the replacement point
+                            // to prevent infinite loops if replace_query contains find_query!
+                            let next_idx = if let Some((rep_line, rep_col)) = next_target_pos {
+                                self.find_replace.matches
+                                    .iter()
+                                    .position(|candidate| {
+                                        candidate.line > rep_line
+                                            || (candidate.line == rep_line && candidate.col >= rep_col)
+                                    })
+                                    .unwrap_or(0)
+                            } else {
+                                curr_idx.min(self.find_replace.matches.len() - 1)
+                            };
                             self.navigate_to_search_match(next_idx);
+                        } else if let Some((rep_line, rep_col)) = next_target_pos {
+                            // If no further matches exist, position cursor right after replacement
+                            // and maintain current scroll position instead of jumping to line 0!
+                            let visible_lines = self.visible_lines();
+                            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                                let scroll_top = tab.scroll_top_line;
+                                tab.scroll_to_line_exact(scroll_top, rep_line, rep_col, visible_lines);
+                            }
                         }
                     }
                 }
@@ -2554,10 +2611,13 @@ impl IdeApp {
             }
             IdeMessage::ReplaceAll => {
                 if !self.find_replace.matches.is_empty() {
+                    let visible_lines = self.visible_lines();
+                    let mut last_rep_pos = None;
                     if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                         tab.push_undo_snapshot();
                         let text = tab.content.text();
                         let mut lines: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
+                        let saved_scroll = tab.scroll_top_line;
                         for m in self.find_replace.matches.iter().rev() {
                             if m.line < lines.len() {
                                 let line_str = &lines[m.line];
@@ -2567,12 +2627,17 @@ impl IdeApp {
                                     new_line.push_str(&self.find_replace.replace_query);
                                     new_line.push_str(&line_str[m.col + m.len..]);
                                     lines[m.line] = new_line;
+                                    last_rep_pos = Some((m.line, m.col + self.find_replace.replace_query.len()));
                                 }
                             }
                         }
                         let new_text = lines.join("\n");
                         tab.content = text_editor::Content::with_text(&new_text);
                         tab.dirty = true;
+                        tab.scroll_top_line = saved_scroll;
+                        if let Some((line, col)) = last_rep_pos {
+                            tab.scroll_to_line_exact(saved_scroll, line, col, visible_lines);
+                        }
                     }
                     self.refresh_find_matches();
                 }
@@ -3145,6 +3210,57 @@ mod tests {
         // 6. Close Find
         let _ = app.update(IdeMessage::CloseFind);
         assert!(!app.find_replace.is_open);
+    }
+
+    #[test]
+    fn test_find_and_replace_recursive_target_progression_and_open_replace() {
+        let (mut app, _) = IdeApp::new();
+        let code = "(setq oca-1 10)\n(setq oca-2 (+ oca-1 20))\n(princ oca-1)\n";
+        if let Some(tab) = app.tabs.get_mut(app.active_tab) {
+            tab.content = text_editor::Content::with_text(code);
+        }
+
+        // Test OpenReplace opens find overlay with replace expanded
+        let _ = app.update(IdeMessage::OpenReplace);
+        assert!(app.find_replace.is_open);
+        assert!(app.find_replace.show_replace);
+
+        // Search for "oca-" and replace with "ocad-" (replace query contains find query!)
+        let _ = app.update(IdeMessage::FindQueryChanged("oca-".to_string()));
+        let _ = app.update(IdeMessage::ReplaceQueryChanged("ocad-".to_string()));
+        assert_eq!(app.find_replace.matches.len(), 4);
+        assert_eq!(app.find_replace.current_match_idx, Some(0));
+
+        // Replace first match (on line 0): progresses to match on line 1 (now index 0)
+        let _ = app.update(IdeMessage::ReplaceCurrent);
+        assert_eq!(app.find_replace.matches.len(), 3);
+        assert_eq!(app.find_replace.current_match_idx, Some(0));
+        assert_eq!(app.find_replace.matches[0].line, 1);
+        let text_1 = app.tabs[app.active_tab].content.text();
+        assert!(text_1.starts_with("(setq ocad-1 10)"));
+
+        // Replace second match (on line 1, first oca-)
+        let _ = app.update(IdeMessage::ReplaceCurrent);
+        assert_eq!(app.find_replace.matches.len(), 2);
+        assert_eq!(app.find_replace.matches[0].line, 1);
+        let text_2 = app.tabs[app.active_tab].content.text();
+        assert!(text_2.contains("(setq ocad-2 (+ oca-1 20))"));
+
+        // Replace third match (on line 1, second oca-)
+        let _ = app.update(IdeMessage::ReplaceCurrent);
+        assert_eq!(app.find_replace.matches.len(), 1);
+        assert_eq!(app.find_replace.matches[0].line, 2);
+        let text_3 = app.tabs[app.active_tab].content.text();
+        assert!(text_3.contains("(+ ocad-1 20)"));
+
+        // Replace fourth match (on line 2, last match in file)
+        let _ = app.update(IdeMessage::ReplaceCurrent);
+        let text_4 = app.tabs[app.active_tab].content.text();
+        assert!(text_4.contains("(princ ocad-1)"));
+        assert_eq!(app.find_replace.matches.len(), 0);
+        // Cursor remains after the replacement rather than jumping to document start
+        let tab = &app.tabs[app.active_tab];
+        assert_eq!(tab.content.cursor().position.line, 2);
     }
 
     #[test]

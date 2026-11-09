@@ -363,7 +363,8 @@ fn editor_context_menu(
         item("Copy (Ctrl+C)".to_string(), has_selection.then_some(IdeMessage::EditorCopy)),
         item("Paste (Ctrl+V)".to_string(), Some(IdeMessage::EditorPasteRequest)),
         menu_sep(),
-        item("Find & Replace (Ctrl+F)".to_string(), Some(IdeMessage::OpenFind)),
+        item("Find (Ctrl+F)".to_string(), Some(IdeMessage::OpenFind)),
+        item("Replace (Ctrl+H)".to_string(), Some(IdeMessage::OpenReplace)),
         menu_sep(),
         item("Format Selection (Ctrl+Shift+F)".to_string(), Some(IdeMessage::FormatSelection)),
         item("Format Document (Shift+Alt+F)".to_string(), Some(IdeMessage::FormatDocument)),
@@ -676,7 +677,8 @@ fn render_find_replace_overlay<'a>(
             Space::new().width(Fill),
             panel,
             Space::new().width(Length::Fixed(16.0)),
-        ],
+        ]
+        .width(Fill),
     ]
     .width(Fill)
     .into()
@@ -2046,7 +2048,7 @@ fn render_ide_layout<'a>(
         } else {
             ide_secondary_button
         }),
-        "Find & Replace (Ctrl+F)",
+        "Find (Ctrl+F) | Replace (Ctrl+H)",
     );
 
     let btn_variables = ide_tooltip(
@@ -4468,6 +4470,7 @@ mod tests {
     #[test]
     fn test_context_menu_app_integration_and_f2() {
         let (mut app, _) = crate::ide::app::IdeApp::new();
+        app.settings = IdeSettings::default();
 
         // 1. Initial state: context menu is None, api drawer is open by default
         assert!(app.context_menu.is_none());
