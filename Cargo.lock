@@ -21,7 +21,7 @@ checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
 [[package]]
 name = "acadrust"
 version = "0.6.8"
-source = "git+https://github.com/hakanaktt/acadrust.git?rev=53e6420c4df4d207409798c2719d32fc6cf2811d#53e6420c4df4d207409798c2719d32fc6cf2811d"
+source = "git+https://github.com/hakanaktt/acadrust.git?rev=eababc03#eababc03c625eaf9cfc5169953d7ee88f2015338"
 dependencies = [
  "anyhow",
  "bitflags 2.13.2",
@@ -2705,7 +2705,7 @@ dependencies = [
 [[package]]
 name = "opencaddocument"
 version = "0.1.0"
-source = "git+https://github.com/HakanSeven12/opencaddocument.git?rev=d657f94#d657f945f9d39e00548c76a8f52424881feeed1d"
+source = "git+https://github.com/HakanSeven12/opencaddocument.git?rev=b9e1762#b9e1762969f3897e67e1801a2199445b6cf83b5d"
 dependencies = [
  "acadrust",
  "serde",
@@ -5287,3 +5287,8 @@ dependencies = [
  "syn 3.0.9",
  "winnow",
 ]
+
+[[patch.unused]]
+name = "acadrust"
+version = "0.6.8"
+source = "git+https://github.com/hakanaktt/acadrust.git?rev=53e6420c4df4d207409798c2719d32fc6cf2811d#53e6420c4df4d207409798c2719d32fc6cf2811d"
