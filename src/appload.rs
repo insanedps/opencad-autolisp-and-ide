@@ -367,7 +367,6 @@ impl InteractiveCommand for ApploadCommand {
                     save: false,
                 })
                 .with_control(DialogControl::InfoText {
-                    id: Some("startup_info".to_string()),
                     text: "Selected scripts above are automatically added to the list below."
                         .to_string(),
                     align_h: Some(HorizontalAlign::Left),
@@ -422,7 +421,6 @@ impl InteractiveCommand for ApploadCommand {
                         save: false,
                     },
                     DialogControl::InfoText {
-                        id: Some("startup_info".to_string()),
                         text: "Selected scripts above are automatically added to the list below."
                             .to_string(),
                         align_h: Some(HorizontalAlign::Left),
@@ -458,9 +456,15 @@ impl InteractiveCommand for ApploadCommand {
                     updates.insert("startup_files".to_string(), DialogValue::Table(rows));
                     updates.insert("startup_add_file".to_string(), DialogValue::FilePath(String::new()));
                     let filename = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+                    let status_msg = format!("Added \"{}\" to startup scripts.", filename);
                     updates.insert(
                         "startup_info".to_string(),
-                        DialogValue::Text(format!("Added \"{}\" to startup scripts.", filename)),
+                        DialogValue::Text(status_msg.clone()),
+                    );
+                    updates.insert(
+                        "Selected scripts above are automatically added to the list below."
+                            .to_string(),
+                        DialogValue::Text(status_msg),
                     );
                     return DialogActionResponse::UpdateValues(updates);
                 }
@@ -472,9 +476,15 @@ impl InteractiveCommand for ApploadCommand {
                     let removed = self.startup_files.remove(row_idx);
                     let filename = removed.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
                     let mut updates = HashMap::new();
+                    let status_msg = format!("Removed \"{}\" from startup scripts.", filename);
                     updates.insert(
                         "startup_info".to_string(),
-                        DialogValue::Text(format!("Removed \"{}\" from startup scripts.", filename)),
+                        DialogValue::Text(status_msg.clone()),
+                    );
+                    updates.insert(
+                        "Selected scripts above are automatically added to the list below."
+                            .to_string(),
+                        DialogValue::Text(status_msg),
                     );
                     return DialogActionResponse::UpdateValues(updates);
                 }

@@ -2991,7 +2991,6 @@ impl CadBridge for OpenCadRustBridge {
         def.cancel_label = cancel_lbl.to_string();
         def.width = Some(360.0);
         def.rows.push(DialogRow::single(DialogControl::InfoText {
-            id: None,
             text: prompt.to_string(),
             align_h: None,
         }));
