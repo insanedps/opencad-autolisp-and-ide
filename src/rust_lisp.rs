@@ -5490,6 +5490,172 @@ mod tests {
         clean_tab_state(tab_b);
         crate::context::set_thread_tab_id(None);
     }
+
+    #[test]
+    fn test_c_testdialog_exact_flow() {
+        let code = r#"
+            (defun c:testdialog (/ dlg res on-dialog-action)
+              (defun on-dialog-action (id action values / picked current-tbl new-tbl count-msg mode-val log-val)
+                (cond
+                  ((or (= action "pick") (= id "picker"))
+                   (setq picked (oca-get "picker" values))
+                   (setq current-tbl (oca-get "tbl_files" values))
+                   (if (and picked (/= picked ""))
+                     (progn
+                       (setq new-tbl (append current-tbl (list (list picked "Active"))))
+                       (setq count-msg (strcat "Added file. Total in list: " (itoa (length new-tbl))))
+                       (list
+                         (cons "tbl_files" new-tbl)
+                         (cons "picker" "")
+                         (cons "lbl_status" count-msg)
+                       )
+                     )
+                     nil
+                   ))
+                  ((= id "btn_clear")
+                   (list
+                     (cons "tbl_files" '())
+                     (cons "lbl_status" "List cleared. 0 items in table.")
+                   ))
+                  ((= id "btn_inspect")
+                   (setq mode-val (oca-get "cmb_mode" values))
+                   (setq log-val (oca-get "chk_log" values))
+                   (list
+                     (cons "lbl_status"
+                           (strcat "Active Mode: " (vl-princ-to-string mode-val)
+                                   " | Console Log: " (if log-val "ON" "OFF")))
+                   ))
+                  (t nil)
+                )
+              )
+
+              (setq dlg
+                (oca-dialog "AutoLISP Reactive Dialog Test"
+                  '((width . 560.0) (submit . "Done") (cancel . "Cancel"))
+                  (oca-text "lbl_status" "Status" "Ready - Pick a file or click buttons to test reactivity")
+                  (oca-row
+                    (oca-file "picker" "Pick LISP File" "" '((filter . "AutoLISP (*.lsp)") (extensions . ("lsp"))))
+                    (oca-button "btn_clear" "Clear List")
+                  )
+                  (oca-row
+                    (oca-table "tbl_files" "Configured Scripts"
+                      '("File Path" "Status")
+                      '(("C:/example/first.lsp" "Active")
+                        ("C:/example/second.lsp" "Active"))
+                      '((allow_add . T) (allow_delete . T))
+                    )
+                  )
+                  (oca-row
+                    (oca-choice "cmb_mode" "Execution Mode" '("Standard" "Fast" "Debug") "Standard")
+                    (oca-checkbox "chk_log" "Log to Console" T)
+                    (oca-button "btn_inspect" "Inspect State")
+                  )
+                )
+              )
+
+              (setq res (oca-dialog-show dlg 'on-dialog-action))
+              (if res "SUBMITTED" "CANCELLED")
+            )
+        "#;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (worker_tx, _) = std::sync::mpsc::channel();
+        let _ = get_task_tx().send(LispTask::Eval {
+            code: code.to_string(),
+            resp: tx,
+            worker_tx,
+        });
+        let res = rx.recv().unwrap();
+        assert!(res.is_ok(), "eval should succeed: {:?}", res);
+
+        let (worker_tx, worker_rx) = std::sync::mpsc::channel();
+        let (done_tx, _) = std::sync::mpsc::channel();
+        let _ = get_task_tx().send(LispTask::ExecuteCommand {
+            lisp_call: "(c:testdialog)".to_string(),
+            worker_tx,
+            done: done_tx,
+        });
+
+        let mut mock_host = crate::context::DebugHost::new(None);
+        let mut cmd = loop {
+            match worker_rx.recv().unwrap() {
+                WorkerMsg::HostCall(mut task) => {
+                    task(&mut mock_host);
+                }
+                WorkerMsg::InteractiveStarted(c) => break c,
+                other => panic!("Expected InteractiveStarted, got {:?}", match other {
+                    WorkerMsg::HostCall(_) => "HostCall",
+                    WorkerMsg::Finished(r) => panic!("Finished with {:?}", r),
+                    _ => "Other",
+                }),
+            }
+        };
+
+        // Verify modal dialog was set
+        let dlg = cmd.modal_dialog().expect("Dialog should be set");
+        assert_eq!(dlg.title, "AutoLISP Reactive Dialog Test");
+
+        // Simulate button click: btn_inspect
+        let mut current_vals = std::collections::HashMap::new();
+        current_vals.insert("cmb_mode".to_string(), ocs_plugin_api::dialog::DialogValue::Choice { index: 0, text: "Standard".to_string() });
+        current_vals.insert("chk_log".to_string(), ocs_plugin_api::dialog::DialogValue::Bool(true));
+        current_vals.insert("tbl_files".to_string(), ocs_plugin_api::dialog::DialogValue::Table(vec![
+            vec!["C:/example/first.lsp".to_string(), "Active".to_string()],
+        ]));
+
+        let event = ocs_plugin_api::dialog::DialogEvent {
+            control_id: "btn_inspect".to_string(),
+            action: "click".to_string(),
+            value: None,
+            current_values: current_vals.clone(),
+        };
+        let act_resp = cmd.on_dialog_action(event);
+        match act_resp {
+            ocs_plugin_api::dialog::DialogActionResponse::UpdateValues(vals) => {
+                let status = vals.get("lbl_status").expect("lbl_status should be updated");
+                match status {
+                    ocs_plugin_api::dialog::DialogValue::Text(s) => {
+                        assert!(s.contains("Active Mode: Standard"), "Expected 'Active Mode: Standard', got: {s}");
+                        assert!(s.contains("Console Log: ON"), "Expected 'Console Log: ON', got: {s}");
+                    }
+                    other => panic!("Expected Text, got {:?}", other),
+                }
+            }
+            other => panic!("Expected UpdateValues, got {:?}", other),
+        }
+
+        // Simulate button click: btn_clear
+        let event_clear = ocs_plugin_api::dialog::DialogEvent {
+            control_id: "btn_clear".to_string(),
+            action: "click".to_string(),
+            value: None,
+            current_values: current_vals.clone(),
+        };
+        let act_resp_clear = cmd.on_dialog_action(event_clear);
+        match act_resp_clear {
+            ocs_plugin_api::dialog::DialogActionResponse::UpdateValues(vals) => {
+                let status = vals.get("lbl_status").expect("lbl_status should be updated");
+                match status {
+                    ocs_plugin_api::dialog::DialogValue::Text(s) => {
+                        assert!(s.contains("List cleared"), "Expected 'List cleared', got: {s}");
+                    }
+                    other => panic!("Expected Text, got {:?}", other),
+                }
+                let tbl = vals.get("tbl_files").expect("tbl_files should be updated");
+                match tbl {
+                    ocs_plugin_api::dialog::DialogValue::Table(rows) => {
+                        assert_eq!(rows.len(), 0, "Table should be empty");
+                    }
+                    other => panic!("Expected Table, got {:?}", other),
+                }
+            }
+            other => panic!("Expected UpdateValues, got {:?}", other),
+        }
+
+        // Conclude with submit
+        let step = cmd.on_dialog_response(ocs_plugin_api::dialog::DialogResponse::Submitted(current_vals));
+        assert!(matches!(step, ocs_plugin_api::host::CommandStep::Done));
+    }
 }
 
 
