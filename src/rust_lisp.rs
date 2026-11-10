@@ -5532,7 +5532,7 @@ mod tests {
               (setq dlg
                 (oca-dialog "AutoLISP Reactive Dialog Test"
                   '((width . 560.0) (submit . "Done") (cancel . "Cancel"))
-                  (oca-text "lbl_status" "Status" "Ready - Pick a file or click buttons to test reactivity")
+                  (oca-info "lbl_status" "Ready - Pick a file or click buttons to test reactivity")
                   (oca-row
                     (oca-file "picker" "Pick LISP File" "" '((filter . "AutoLISP (*.lsp)") (extensions . ("lsp"))))
                     (oca-button "btn_clear" "Clear List")
