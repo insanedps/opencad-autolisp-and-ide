@@ -82,6 +82,9 @@ fn seed_panel_defaults(panel_id: &str, controls: &[ocs_plugin_api::dialog::Dialo
     let pid = panel_id.to_lowercase();
     for ctrl in controls {
         match ctrl {
+            DialogControl::Label { id, text, .. } => {
+                map.insert((pid.clone(), id.to_lowercase()), DialogValue::Text(text.clone()));
+            }
             DialogControl::Checkbox { id, default, .. } => {
                 map.insert((pid.clone(), id.to_lowercase()), DialogValue::Bool(*default));
             }

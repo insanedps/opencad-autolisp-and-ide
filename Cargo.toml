@@ -20,7 +20,7 @@ ide-gui = ["dep:iced", "dep:iced_aw", "dep:fontdb", "dep:rfd"]
 python = ["dep:pyo3"]
 
 [dependencies]
-ocs_plugin_api = { path = "../OpenCADStudio/crates/ocs_plugin_api", features = ["host"] }
+ocs_plugin_api = { path = "../OpenCADStudio-upstream-main/crates/ocs_plugin_api", features = ["host"] }
 pyo3 = { version = "0.23", features = ["auto-initialize"], optional = true }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
