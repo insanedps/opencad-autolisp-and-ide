@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tutorial 2: Modal Dialog — OpenCAD AutoLISP</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --surface: #182028;
+      --code-bg: #11161c;
+      --border: #2a3642;
+      --text: #e6edf3;
+      --muted: #9aa7b4;
+      --accent: #4ea1ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.65;
+      padding: 2rem 1.5rem 4rem;
+    }
+    .container { max-width: 860px; margin: 0 auto; }
+    nav { margin-bottom: 1.5rem; font-size: 0.92rem; }
+    nav a { color: var(--accent); text-decoration: none; margin-right: 1.25rem; }
+    nav a:hover { text-decoration: underline; }
+    h1 { font-size: 1.9rem; margin-bottom: 0.35rem; }
+    h2 { margin-top: 2rem; font-size: 1.25rem; border-bottom: 1px solid var(--border); padding-bottom: 0.35rem; }
+    p, li { color: #d5dde5; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: rgba(255,255,255,0.07);
+      padding: 0.12rem 0.35rem;
+      border-radius: 4px;
+      font-size: 0.88em;
+    }
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.15rem;
+      overflow-x: auto;
+      font-size: 0.88rem;
+      line-height: 1.5;
+    }
+    pre code { background: none; padding: 0; }
+    .note {
+      background: rgba(78, 161, 255, 0.1);
+      border-left: 3px solid var(--accent);
+      padding: 0.8rem 1rem;
+      border-radius: 0 6px 6px 0;
+      margin: 1rem 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <nav>
+      <a href="index.html">&larr; Back to Contents</a>
+      <a href="panel_tutorial.html">&larr; Previous: Side Panel Tutorial</a>
+    </nav>
+
+    <h1>Tutorial 2: Programming a Modal Dialog</h1>
+    <p>This tutorial builds the exact same coordinate-drawing tool as a reactive modal dialog using <code>oca-dialog</code>, <code>oca-dialog-show</code>, and an <code>on-dialog-action</code> callback.</p>
+
+    <h2>Step 1: Define the Local Action Callback</h2>
+    <p>Inside <code>c:coorddialog</code>, define a local <code>on-dialog-action</code> function taking <code>(id action values)</code>. When the user clicks <strong>Add Point</strong> (<code>btn_add</code>), read <code>num_x</code>, <code>num_y</code>, and <code>tbl_pts</code> from <code>values</code> with <code>oca-get</code>, and return an association list of updated controls.</p>
+<pre><code>(defun on-dialog-action (id action values / x y tbl new-row new-tbl)
+  (cond
+    ((= id "btn_add")
+     (setq x   (oca-get "num_x" values))
+     (setq y   (oca-get "num_y" values))
+     (setq tbl (oca-get "tbl_pts" values))
+     (if (not tbl) (setq tbl '()))
+
+     (setq new-row (list (rtos (if x x 0.0) 2 4) (rtos (if y y 0.0) 2 4)))
+     (setq new-tbl (append tbl (list new-row)))
+
+     (list
+       (cons "tbl_pts" new-tbl)
+       (cons "lbl_status" (strcat "Points in table: " (itoa (length new-tbl))))
+     ))
+
+    (T nil)
+  )
+)</code></pre>
+
+    <div class="note">
+      <strong>Notice the difference from Side Panels:</strong> In a modal dialog, leaving <code>action</code> off <code>(oca-button "btn_add" "Add Point")</code> automatically routes the click into <code>on-dialog-action</code> with the full <code>values</code> alist. Returning a <code>(cons key val)</code> list updates the dialog in-place.
+    </div>
+
+    <h2>Step 2: Build and Show the Dialog</h2>
+    <p>Use <code>(submit . "Draw Entities")</code> in <code>oca-dialog</code> options so the dialog's primary button closes the dialog and returns all control values in <code>res</code>.</p>
+<pre><code>(setq dlg
+  (oca-dialog "Coordinate Drawer"
+    '((width . 420.0) (submit . "Draw Entities") (cancel . "Cancel"))
+
+    (oca-info "lbl_status" "Enter X, Y and click Add Point.")
+
+    (oca-row
+      (oca-number "num_x" "X" 0.0)
+      (oca-number "num_y" "Y" 0.0)
+      (oca-button "btn_add" "Add Point")
+    )
+
+    (oca-table "tbl_pts" "Coordinates"
+      '("X" "Y")
+      '()
+      '((allow_add . T) (allow_delete . T))
+    )
+
+    (oca-row
+      (oca-choice "cmb_color" "Color" '("Red" "Yellow" "Green" "Cyan" "Blue" "White") "Red")
+      (oca-choice "cmb_type" "Entity Type" '("Lines" "Circles") "Lines")
+    )
+  )
+)
+
+(setq res (oca-dialog-show dlg 'on-dialog-action))</code></pre>
+
+    <h2>Step 3: Draw Entities on Submit</h2>
+    <p>When the user clicks <strong>Draw Entities</strong>, <code>oca-dialog-show</code> returns <code>res</code> (or <code>nil</code> if cancelled). Extract <code>tbl_pts</code>, <code>cmb_color</code>, and <code>cmb_type</code> from <code>res</code> and draw the geometry.</p>
+<pre><code>(defun c:coorddialog (/ dlg res on-dialog-action rows pts col etype old-col i p1 p2)
+  ;; (1) Define on-dialog-action from Step 1 here
+  ;; (2) Build dlg and call (setq res (oca-dialog-show dlg 'on-dialog-action)) from Step 2
+
+  (if res
+    (progn
+      (setq rows  (oca-get "tbl_pts" res))
+      (setq col   (oca-get "cmb_color" res))
+      (setq etype (oca-get "cmb_type" res))
+
+      (setq pts '())
+      (foreach r (if rows rows '())
+        (if (&gt;= (length r) 2)
+          (setq pts (append pts (list (list (atof (nth 0 r)) (atof (nth 1 r)) 0.0))))
+        )
+      )
+
+      (if pts
+        (progn
+          (setq old-col (getvar "CECOLOR"))
+          (setvar "CECOLOR" (strcase (if col col "Red")))
+
+          (cond
+            ((= etype "Lines")
+             (setq i 0)
+             (while (&lt; (1+ i) (length pts))
+               (setq p1 (nth i pts))
+               (setq p2 (nth (1+ i) pts))
+               (command "_.LINE" p1 p2 "")
+               (setq i (1+ i))
+             ))
+            ((= etype "Circles")
+             (foreach p1 pts
+               (command "_.CIRCLE" p1 2.5)
+             ))
+          )
+
+          (setvar "CECOLOR" old-col)
+          (princ (strcat "\nDrew " etype " in " col "."))
+        )
+        (princ "\nNo points in table.")
+      )
+    )
+    (princ "\nCancelled.")
+  )
+  (princ)
+)</code></pre>
+
+    <h2>How to Run</h2>
+    <p>Save the complete <code>c:coorddialog</code> function (with Steps 1 and 2 placed inside it) to <code>coord_dialog.lsp</code>, load it with <code>APPLOAD</code>, and run <code>COORDDIALOG</code>.</p>
+  </div>
+</body>
+</html>

@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tutorial 1: Side Panel — OpenCAD AutoLISP</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --surface: #182028;
+      --code-bg: #11161c;
+      --border: #2a3642;
+      --text: #e6edf3;
+      --muted: #9aa7b4;
+      --accent: #4ea1ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.65;
+      padding: 2rem 1.5rem 4rem;
+    }
+    .container { max-width: 860px; margin: 0 auto; }
+    nav { margin-bottom: 1.5rem; font-size: 0.92rem; }
+    nav a { color: var(--accent); text-decoration: none; margin-right: 1.25rem; }
+    nav a:hover { text-decoration: underline; }
+    h1 { font-size: 1.9rem; margin-bottom: 0.35rem; }
+    h2 { margin-top: 2rem; font-size: 1.25rem; border-bottom: 1px solid var(--border); padding-bottom: 0.35rem; }
+    p, li { color: #d5dde5; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: rgba(255,255,255,0.07);
+      padding: 0.12rem 0.35rem;
+      border-radius: 4px;
+      font-size: 0.88em;
+    }
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.15rem;
+      overflow-x: auto;
+      font-size: 0.88rem;
+      line-height: 1.5;
+    }
+    pre code { background: none; padding: 0; }
+    .note {
+      background: rgba(78, 161, 255, 0.1);
+      border-left: 3px solid var(--accent);
+      padding: 0.8rem 1rem;
+      border-radius: 0 6px 6px 0;
+      margin: 1rem 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <nav>
+      <a href="index.html">&larr; Back to Contents</a>
+      <a href="dialog_tutorial.html">Next: Modal Dialog Tutorial &rarr;</a>
+    </nav>
+
+    <h1>Tutorial 1: Programming a Side Panel</h1>
+    <p>This tutorial builds a dockable AutoLISP side panel where users enter X/Y coordinates, add them to a table, pick a color and entity type (<strong>Lines</strong> or <strong>Circles</strong>), and draw them into the active drawing.</p>
+
+    <h2>Step 1: Register the Panel Layout</h2>
+    <p>Use <code>oca-panel-register</code> to define the panel ID, title, options, and controls. Each button uses an explicit <code>'((action . "(func)"))</code> so clicking it evaluates a regular AutoLISP <code>defun</code> directly.</p>
+<pre><code>(defun c:coordpanel ()
+  (oca-panel-register "coord_panel" "Coordinate Drawer"
+    '((width . 320) (command . "COORDPANEL"))
+
+    (oca-info "lbl_status" "Enter X, Y and click Add Point.")
+
+    (oca-row
+      (oca-number "num_x" "X" 0.0)
+      (oca-number "num_y" "Y" 0.0)
+    )
+    (oca-button "btn_add" "Add Point" '((action . "(coord-panel-add)")))
+
+    (oca-table "tbl_pts" "Coordinates"
+      '("X" "Y")
+      '()
+      '((allow_add . T) (allow_delete . T))
+    )
+
+    (oca-choice "cmb_color" "Color" '("Red" "Yellow" "Green" "Cyan" "Blue" "White") "Red")
+    (oca-choice "cmb_type" "Entity Type" '("Lines" "Circles") "Lines")
+
+    (oca-row
+      (oca-button "btn_draw" "Draw Entities" '((action . "(coord-panel-draw)")))
+      (oca-button "btn_clear" "Clear" '((action . "clear")))
+    )
+  )
+  (oca-panel-toggle "coord_panel" T)
+  (princ)
+)</code></pre>
+
+    <div class="note">
+      <strong>Why use <code>'((action . "(coord-panel-add)"))</code>?</strong> Side panel buttons with an S-expression <code>action</code> dispatch straight to AutoLISP, allowing any normal <code>defun</code> to run without creating extra global <code>c:</code> commands.
+    </div>
+
+    <h2>Step 2: Add Coordinates to the Table</h2>
+    <p>Read the current <code>num_x</code>, <code>num_y</code>, and <code>tbl_pts</code> values with <code>oca-panel-get</code>, append a new <code>(x-str y-str)</code> row, and push the updated table back using <code>oca-panel-update</code>.</p>
+<pre><code>(defun coord-panel-add (/ x y tbl new-row new-tbl)
+  (setq x (oca-panel-get "coord_panel" "num_x"))
+  (setq y (oca-panel-get "coord_panel" "num_y"))
+  (setq tbl (oca-panel-get "coord_panel" "tbl_pts"))
+  (if (not tbl) (setq tbl '()))
+
+  (setq new-row (list (rtos (if x x 0.0) 2 4) (rtos (if y y 0.0) 2 4)))
+  (setq new-tbl (append tbl (list new-row)))
+
+  (oca-panel-update "coord_panel"
+    (list
+      (cons "tbl_pts" new-tbl)
+      (cons "lbl_status" (strcat "Points in table: " (itoa (length new-tbl))))
+    ))
+  (princ)
+)</code></pre>
+
+    <h2>Step 3: Draw Lines or Circles in the Selected Color</h2>
+    <p>Convert each table row into a 3D point <code>(x y 0.0)</code>, apply the chosen color via <code>CECOLOR</code>, and either:</p>
+    <ul>
+      <li><strong>Lines:</strong> Connect point 1 &rarr; point 2, point 2 &rarr; point 3, and so on.</li>
+      <li><strong>Circles:</strong> Place a circle (radius <code>2.5</code>) centered on every point in the table.</li>
+    </ul>
+<pre><code>(defun coord-rows->pts (rows / pts)
+  (setq pts '())
+  (foreach r rows
+    (if (&gt;= (length r) 2)
+      (setq pts (append pts (list (list (atof (nth 0 r)) (atof (nth 1 r)) 0.0))))
+    )
+  )
+  pts
+)
+
+(defun coord-draw-entities (pts color-name entity-type / old-col i p1 p2)
+  (setq old-col (getvar "CECOLOR"))
+  (setvar "CECOLOR" (strcase color-name))
+
+  (cond
+    ((= entity-type "Lines")
+     (setq i 0)
+     (while (&lt; (1+ i) (length pts))
+       (setq p1 (nth i pts))
+       (setq p2 (nth (1+ i) pts))
+       (command "_.LINE" p1 p2 "")
+       (setq i (1+ i))
+     ))
+    ((= entity-type "Circles")
+     (foreach p1 pts
+       (command "_.CIRCLE" p1 2.5)
+     ))
+  )
+
+  (setvar "CECOLOR" old-col)
+)
+
+(defun coord-panel-draw (/ rows pts col etype)
+  (setq rows  (oca-panel-get "coord_panel" "tbl_pts"))
+  (setq col   (oca-panel-get "coord_panel" "cmb_color"))
+  (setq etype (oca-panel-get "coord_panel" "cmb_type"))
+  (setq pts   (coord-rows->pts (if rows rows '())))
+
+  (cond
+    ((null pts)
+     (oca-panel-update "coord_panel" '((lbl_status . "Add at least one point first."))))
+    ((and (= etype "Lines") (&lt; (length pts) 2))
+     (oca-panel-update "coord_panel" '((lbl_status . "Lines need at least 2 points."))))
+    (T
+     (coord-draw-entities pts (if col col "Red") (if etype etype "Lines"))
+     (oca-panel-update "coord_panel"
+       (list (cons "lbl_status" (strcat "Drew " etype " in " col ".")))))
+  )
+  (princ)
+)</code></pre>
+
+    <h2>Complete Script (<code>coord_panel.lsp</code>)</h2>
+    <p>Save all three snippets together into <code>coord_panel.lsp</code>, load it with <code>APPLOAD</code> or <code>(load "...")</code>, and run <code>COORDPANEL</code>.</p>
+  </div>
+</body>
+</html>
