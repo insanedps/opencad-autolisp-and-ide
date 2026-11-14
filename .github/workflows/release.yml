@@ -23,7 +23,7 @@ jobs:
             ext: dll
             exe_ext: .exe
             platform: windows-x86_64
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             ext: so
             exe_ext: ""
             platform: linux-x86_64
@@ -36,7 +36,12 @@ jobs:
     steps:
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libfontconfig1-dev
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libgl1-mesa-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev \
+            libxkbcommon-dev libwayland-dev libfontconfig1-dev libfreetype6-dev
 
       # 1. Checkout all three repos side-by-side to satisfy relative Cargo path dependencies
       - name: Checkout opencad-autolisp-and-ide
@@ -74,7 +79,11 @@ jobs:
       # 3. Build release binaries (lean plugin library + standalone IDE GUI)
       - name: Build release binaries
         working-directory: opencad-autolisp-and-ide
+        shell: bash
         run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-rpath,\$ORIGIN -C link-arg=-Wl,-z,origin"
+          fi
           cargo build --release --lib
           cargo build --release --bin opencad_autolisp_ide --features ide-gui
 
