@@ -85,9 +85,10 @@ jobs:
           mkdir -p bundle
           mkdir -p dist
 
-          # Copy plugin.toml and INSTALL instructions
+          # Copy plugin.toml, INSTALL instructions, and tutorials
           cp opencad-autolisp-and-ide/plugin.toml bundle/plugin.toml
           cp opencad-autolisp-and-ide/INSTALL.txt bundle/INSTALL.txt
+          cp -r opencad-autolisp-and-ide/tutorials bundle/tutorials
 
           # Copy plugin library (named for OpenCAD Studio)
           cp opencad-autolisp-and-ide/target/release/*opencad_autolisp.${{ matrix.ext }} "bundle/opencad.autolisp_and_ide.${{ matrix.ext }}"
