@@ -705,6 +705,7 @@ pub fn view_standalone_window<'a>(
     visible_lines: usize,
     settings: &'a IdeSettings,
     settings_open: bool,
+    help_menu_open: bool,
     settings_tab: SettingsTab,
     active_color_target: SyntaxColorTarget,
     syntax_hex_input: &'a str,
@@ -745,6 +746,7 @@ pub fn view_standalone_window<'a>(
         visible_lines,
         settings,
         settings_open,
+        help_menu_open,
         settings_tab,
         active_color_target,
         syntax_hex_input,
@@ -1788,6 +1790,7 @@ fn render_ide_layout<'a>(
     visible_lines: usize,
     settings: &'a IdeSettings,
     settings_open: bool,
+    help_menu_open: bool,
     settings_tab: SettingsTab,
     active_color_target: SyntaxColorTarget,
     syntax_hex_input: &'a str,
@@ -2154,6 +2157,25 @@ fn render_ide_layout<'a>(
         "Open IDE Settings",
     );
 
+    let btn_help = ide_tooltip(
+        button(
+            row![
+                text("?").size(14),
+                text("Help ▾").size(13),
+            ]
+            .spacing(4)
+            .align_y(iced::Center),
+        )
+        .on_press(IdeMessage::ToggleHelpMenu)
+        .padding([6, 12])
+        .style(if help_menu_open {
+            button::primary
+        } else {
+            ide_secondary_button
+        }),
+        "Help & Tutorials",
+    );
+
     toolbar_items = toolbar_items
         .push(btn_new)
         .push(btn_open)
@@ -2173,6 +2195,7 @@ fn render_ide_layout<'a>(
     }
     toolbar_items = toolbar_items.push(btn_transparency);
     toolbar_items = toolbar_items.push(btn_settings);
+    toolbar_items = toolbar_items.push(btn_help);
     toolbar_items = toolbar_items.push(btn_clear);
 
     let toolbar_bar = container(toolbar_items)
@@ -2535,8 +2558,8 @@ fn render_ide_layout<'a>(
                     let mut cur_x = 0.0_f32;
 
                     for (m_idx, m) in line_matches {
-                        let v_start = crate::ide::highlight::visual_col_for_byte_col(line_str, m.col);
-                        let v_end = crate::ide::highlight::visual_col_for_byte_col(line_str, m.col + m.len);
+                        let v_start = crate::ide::highlight::visual_col_for_byte_col(line_str, m.col + 1);
+                        let v_end = crate::ide::highlight::visual_col_for_byte_col(line_str, m.col + m.len + 1);
                         let glyph_x = PADDING_X + (v_start as f32) * char_w;
                         let pill_x = (glyph_x - 1.0).max(cur_x);
                         if pill_x > cur_x {
@@ -2575,6 +2598,87 @@ fn render_ide_layout<'a>(
             }
         }
         let search_highlights_col = column(search_highlight_items)
+            .width(Fill)
+            .height(Length::Fixed(exact_editor_height));
+
+        let mut selection_highlight_items: Vec<Element<'a, IdeMessage>> = Vec::new();
+        let mut last_sel_y = 0.0_f32;
+        if current.is_scrolling_away {
+            if let Some(edit_cursor) = current.last_edit_cursor {
+                if let Some(sel) = edit_cursor.selection {
+                    if edit_cursor.position != sel {
+                        let (start_pos, end_pos) = if edit_cursor.position.line < sel.line
+                            || (edit_cursor.position.line == sel.line
+                                && edit_cursor.position.column <= sel.column)
+                        {
+                            (edit_cursor.position, sel)
+                        } else {
+                            (sel, edit_cursor.position)
+                        };
+                        let sel_bg = iced::Color::from_rgba(0.24, 0.52, 0.88, 0.35);
+
+                        for line_num in visible_start..=visible_end {
+                            let line_idx = line_num.saturating_sub(1);
+                            if line_idx < start_pos.line || line_idx > end_pos.line {
+                                continue;
+                            }
+                            let line_str = all_lines.get(line_idx).copied().unwrap_or("");
+                            let byte_start = if line_idx == start_pos.line {
+                                start_pos.column.min(line_str.len())
+                            } else {
+                                0
+                            };
+                            let byte_end = if line_idx == end_pos.line {
+                                end_pos.column.min(line_str.len())
+                            } else {
+                                line_str.len()
+                            };
+                            if line_idx == end_pos.line && byte_end <= byte_start {
+                                continue;
+                            }
+
+                            let v_start = crate::ide::highlight::visual_col_for_byte_col(line_str, byte_start + 1);
+                            let v_end = crate::ide::highlight::visual_col_for_byte_col(line_str, byte_end + 1);
+                            let cols = v_end.saturating_sub(v_start)
+                                + if line_idx < end_pos.line { 1 } else { 0 };
+                            if cols == 0 {
+                                continue;
+                            }
+
+                            let rel_idx = line_num - visible_start;
+                            let target_y = PADDING_Y + (rel_idx as f32) * line_height;
+                            if target_y > last_sel_y {
+                                selection_highlight_items.push(
+                                    Space::new().height(Length::Fixed(target_y - last_sel_y)).into(),
+                                );
+                            }
+                            let pill_x = PADDING_X + (v_start as f32) * char_w;
+                            let pill_w = (cols as f32) * char_w;
+                            let pill = container(Space::new())
+                                .height(Length::Fixed(line_height))
+                                .width(Length::Fixed(pill_w))
+                                .style(move |_t: &Theme| container::Style {
+                                    background: Some(Background::Color(sel_bg)),
+                                    ..Default::default()
+                                });
+                            let mut row_items: Vec<Element<'a, IdeMessage>> = Vec::new();
+                            if pill_x > 0.0 {
+                                row_items.push(Space::new().width(Length::Fixed(pill_x)).into());
+                            }
+                            row_items.push(pill.into());
+                            selection_highlight_items.push(
+                                row(row_items)
+                                    .height(Length::Fixed(line_height))
+                                    .width(Fill)
+                                    .into(),
+                            );
+                            last_sel_y = target_y + line_height;
+                        }
+                    }
+                }
+            }
+        }
+        let selection_highlights_col = column(selection_highlight_items)
             .width(Fill)
             .height(Length::Fixed(exact_editor_height));
 
@@ -2834,6 +2938,7 @@ fn render_ide_layout<'a>(
 
         let mut editor_stack = stack![
             highlights_col,
+            selection_highlights_col,
             search_highlights_col,
             ed,
         ];
@@ -3217,15 +3322,15 @@ fn render_ide_layout<'a>(
     let variables_drawer: Option<Element<'a, IdeMessage>> = if variables_open {
         let mut watch_list = column![].spacing(3);
         let mut header_row = row![
-            text("Expression").size(11).style(primary_style).width(Length::Fixed(80.0)),
-            text("Value").size(11).style(primary_style).width(Fill),
+            text("Expression").size(13).style(primary_style).width(Length::Fixed(95.0)),
+            text("Value").size(13).style(primary_style).width(Fill),
         ]
         .spacing(4)
         .align_y(iced::Center);
 
         if !watch_vars.is_empty() {
             header_row = header_row.push(
-                button(text("Clear").size(10))
+                button(text("Clear").size(12))
                     .on_press(IdeMessage::ClearWatch)
                     .padding([1, 4])
                     .style(button::text),
@@ -3237,7 +3342,7 @@ fn render_ide_layout<'a>(
         if watch_vars.is_empty() {
             watch_list = watch_list.push(
                 text("No watch expressions (Right-click or Shift+F9 on variable)")
-                    .size(10)
+                    .size(12)
                     .style(muted_style),
             );
         } else {
@@ -3251,7 +3356,7 @@ fn render_ide_layout<'a>(
                 };
 
                 let mut val_col = column![
-                    text(val_str).size(11).font(iced::Font::MONOSPACE)
+                    text(val_str).size(13).font(iced::Font::MONOSPACE)
                         .style(move |_t| text::Style {
                             color: if in_scope { None } else { Some(iced::Color::from_rgb(0.55, 0.55, 0.55)) },
                         }),
@@ -3259,14 +3364,14 @@ fn render_ide_layout<'a>(
                 .width(Fill);
 
                 if !type_str.is_empty() {
-                    val_col = val_col.push(text(type_str).size(9).font(iced::Font::MONOSPACE).style(muted_style));
+                    val_col = val_col.push(text(type_str).size(11).font(iced::Font::MONOSPACE).style(muted_style));
                 }
 
                 let row_item = container(
                     row![
-                        text(var_name.clone()).size(11).font(iced::Font::MONOSPACE).width(Length::Fixed(80.0)),
+                        text(var_name.clone()).size(13).font(iced::Font::MONOSPACE).width(Length::Fixed(95.0)),
                         val_col,
-                        button(text("✕").size(10))
+                        button(text("✕").size(12))
                             .on_press(IdeMessage::RemoveWatch(w_idx))
                             .padding([1, 4])
                             .style(button::text),
@@ -3289,9 +3394,9 @@ fn render_ide_layout<'a>(
         let mut vars_list = column![].spacing(3);
         vars_list = vars_list.push(
             row![
-                text("Name").size(11).style(primary_style).width(Length::Fixed(80.0)),
-                text("Type").size(11).style(primary_style).width(Length::Fixed(70.0)),
-                text("Value").size(11).style(primary_style).width(Fill),
+                text("Name").size(13).style(primary_style).width(Length::Fixed(95.0)),
+                text("Type").size(13).style(primary_style).width(Length::Fixed(80.0)),
+                text("Value").size(13).style(primary_style).width(Fill),
             ]
             .spacing(6)
             .align_y(iced::Center),
@@ -3301,16 +3406,16 @@ fn render_ide_layout<'a>(
         if debug_locals.is_empty() {
             vars_list = vars_list.push(
                 text(if is_debugging { "No local variables in frame" } else { "Start debugging to inspect variables" })
-                    .size(11)
+                    .size(13)
                     .style(muted_style),
             );
         } else {
             for (name, type_name, repr_val) in debug_locals {
                 let row_item = container(
                     row![
-                        text(name).size(11).font(iced::Font::MONOSPACE).width(Length::Fixed(80.0)),
-                        text(type_name).size(10).font(iced::Font::MONOSPACE).style(muted_style).width(Length::Fixed(70.0)),
-                        text(repr_val).size(11).font(iced::Font::MONOSPACE).width(Fill),
+                        text(name).size(13).font(iced::Font::MONOSPACE).width(Length::Fixed(95.0)),
+                        text(type_name).size(12).font(iced::Font::MONOSPACE).style(muted_style).width(Length::Fixed(80.0)),
+                        text(repr_val).size(13).font(iced::Font::MONOSPACE).width(Fill),
                     ]
                     .spacing(6)
                     .align_y(iced::Center),
@@ -3330,9 +3435,9 @@ fn render_ide_layout<'a>(
         let mut stack_list = column![].spacing(3);
         stack_list = stack_list.push(
             row![
-                text("Function").size(11).style(primary_style).width(Length::Fixed(90.0)),
-                text("Line").size(11).style(primary_style).width(Length::Fixed(40.0)),
-                text("File").size(11).style(primary_style).width(Fill),
+                text("Function").size(13).style(primary_style).width(Length::Fixed(105.0)),
+                text("Line").size(13).style(primary_style).width(Length::Fixed(48.0)),
+                text("File").size(13).style(primary_style).width(Fill),
             ]
             .spacing(6)
             .align_y(iced::Center),
@@ -3342,7 +3447,7 @@ fn render_ide_layout<'a>(
         if debug_stack.is_empty() {
             stack_list = stack_list.push(
                 text(if is_debugging { "Call stack empty" } else { "No active call stack" })
-                    .size(11)
+                    .size(13)
                     .style(muted_style),
             );
         } else {
@@ -3353,9 +3458,9 @@ fn render_ide_layout<'a>(
                     .unwrap_or(filename);
                 let row_item = container(
                     row![
-                        text(format!("{func_name}()")).size(11).font(iced::Font::MONOSPACE).width(Length::Fixed(90.0)),
-                        text(format!(":{lineno}")).size(11).font(iced::Font::MONOSPACE).style(muted_style).width(Length::Fixed(40.0)),
-                        text(short_fname).size(10).font(iced::Font::MONOSPACE).width(Fill),
+                        text(format!("{func_name}()")).size(13).font(iced::Font::MONOSPACE).width(Length::Fixed(105.0)),
+                        text(format!(":{lineno}")).size(13).font(iced::Font::MONOSPACE).style(muted_style).width(Length::Fixed(48.0)),
+                        text(short_fname).size(12).font(iced::Font::MONOSPACE).width(Fill),
                     ]
                     .spacing(6)
                     .align_y(iced::Center),
@@ -3377,7 +3482,7 @@ fn render_ide_layout<'a>(
             if tab.breakpoints.is_empty() {
                 bps_list = bps_list.push(
                     text("No breakpoints set (Press F9 on '(' or S-expr)")
-                        .size(10)
+                        .size(12)
                         .style(muted_style),
                 );
             } else {
@@ -3394,9 +3499,9 @@ fn render_ide_layout<'a>(
                         .unwrap_or_else(|| "(".to_string());
                     let bp_row = container(
                         row![
-                            text(marker).size(11).style(move |_t| text::Style { color: Some(marker_color) }),
-                            text(format!("Ln {}:{} {preview}", bp.line, bp.col)).size(11).font(iced::Font::MONOSPACE).width(Fill),
-                            button(text("✕").size(10))
+                            text(marker).size(13).style(move |_t| text::Style { color: Some(marker_color) }),
+                            text(format!("Ln {}:{} {preview}", bp.line, bp.col)).size(13).font(iced::Font::MONOSPACE).width(Fill),
+                            button(text("✕").size(12))
                                 .on_press(IdeMessage::ToggleParenBreakpoint(bp))
                                 .padding([1, 4])
                                 .style(button::text),
@@ -3420,31 +3525,31 @@ fn render_ide_layout<'a>(
         let panel = container(
             column![
                 row![
-                    text("Debug Inspector").size(12).style(primary_style),
+                    text("Debug Inspector").size(15).style(primary_style),
                     Space::new().width(Fill),
-                    button(text("✕").size(10))
+                    button(text("✕").size(12))
                         .on_press(IdeMessage::ToggleVariables)
                         .padding([1, 4])
                         .style(button::text),
                 ]
                 .align_y(iced::Center),
                 hsep(),
-                text("Watch Expressions").size(11).style(primary_style),
+                text("Watch Expressions").size(14).style(primary_style),
                 scrollable(watch_list).height(Length::FillPortion(2)),
                 hsep(),
-                text("Local Variables").size(11).style(primary_style),
+                text("Local Variables").size(14).style(primary_style),
                 scrollable(vars_list).height(Length::FillPortion(2)),
                 hsep(),
-                text("Call Stack").size(11).style(primary_style),
+                text("Call Stack").size(14).style(primary_style),
                 scrollable(stack_list).height(Length::FillPortion(1)),
                 hsep(),
-                text("Breakpoints").size(11).style(primary_style),
+                text("Breakpoints").size(14).style(primary_style),
                 scrollable(bps_list).height(Length::FillPortion(1)),
             ]
             .spacing(4)
             .padding(6),
         )
-        .width(Length::Fixed(300.0))
+        .width(Length::Fixed(340.0))
         .height(Fill)
         .style(move |_t: &Theme| {
             container::Style {
@@ -3481,33 +3586,47 @@ fn render_ide_layout<'a>(
         };
 
         let active_card: Element<'a, IdeMessage> = if let Some(enclosing) = active_enclosing_doc {
-            let insert_btn = button(text("+ Insert").size(10))
-                .on_press(IdeMessage::InsertSnippet(enclosing.snippet.to_string()))
-                .padding([2, 6])
-                .style(ide_secondary_button);
+            let insert_btn = button(
+                text("+ Insert")
+                    .size(12)
+                    .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .on_press(IdeMessage::InsertSnippet(enclosing.snippet.to_string()))
+            .padding([2, 6])
+            .style(ide_secondary_button);
 
             let mut card_col = column![
                 row![
-                    text(format!("λ Active: {}", enclosing.name)).size(13).style(primary_style),
+                    text(format!("λ Active: {}", enclosing.name))
+                        .size(15)
+                        .wrapping(iced::widget::text::Wrapping::None)
+                        .style(primary_style),
                     Space::new().width(Fill),
-                    text(enclosing.category).size(10).style(muted_style),
-                    Space::new().width(Length::Fixed(6.0)),
+                    text(enclosing.category)
+                        .size(12)
+                        .wrapping(iced::widget::text::Wrapping::None)
+                        .style(muted_style),
                     insert_btn,
                 ]
+                .spacing(8)
                 .align_y(iced::Center),
                 text(format!("💡 {}", enclosing.signature))
-                    .size(12)
+                    .size(14)
                     .font(iced::Font::MONOSPACE)
+                    .wrapping(iced::widget::text::Wrapping::None)
                     .style(muted_style),
-                text(enclosing.description).size(12),
+                text(enclosing.description)
+                    .size(14)
+                    .wrapping(iced::widget::text::Wrapping::None),
             ]
             .spacing(4);
 
             if let Some(dxf) = enclosing.dxf_summary {
                 let dxf_box = container(
                     text(dxf)
-                        .size(11)
+                        .size(13)
                         .font(iced::Font::MONOSPACE)
+                        .wrapping(iced::widget::text::Wrapping::None)
                         .style(|_t: &Theme| text::Style {
                             color: Some(iced::Color::from_rgb(0.78, 0.86, 0.96)),
                         })
@@ -3526,6 +3645,7 @@ fn render_ide_layout<'a>(
             }
 
             container(card_col)
+                .width(Fill)
                 .padding(8)
                 .style(move |t: &Theme| {
                     let p = t.palette();
@@ -3543,19 +3663,24 @@ fn render_ide_layout<'a>(
         } else {
             container(
                 text("Active Enclosure: (None at cursor)")
-                    .size(11)
+                    .size(13)
+                    .wrapping(iced::widget::text::Wrapping::None)
                     .style(muted_style),
             )
+            .width(Fill)
             .padding([4, 6])
             .into()
         };
 
         let search_box = text_input("Search AutoLISP & DXF API...", api_search)
             .on_input(IdeMessage::ApiSearch)
-            .size(13)
+            .size(14)
             .padding([4, 6]);
 
-        api_list = api_list.push(active_card).push(hsep()).push(search_box);
+        api_list = api_list
+            .push(Space::new().width(Length::Fixed(376.0)).height(Length::Fixed(0.0)))
+            .push(active_card)
+            .push(hsep());
 
         for doc in API_DOCS {
             let matches_dxf = doc.dxf_summary.is_some_and(|d| d.to_lowercase().contains(&filter_lower));
@@ -3568,30 +3693,47 @@ fn render_ide_layout<'a>(
                 continue;
             }
 
-            let insert_btn = button(text("+ Insert").size(10))
-                .on_press(IdeMessage::InsertSnippet(doc.snippet.to_string()))
-                .padding([2, 6])
-                .style(ide_secondary_button);
+            let insert_btn = button(
+                text("+ Insert")
+                    .size(12)
+                    .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .on_press(IdeMessage::InsertSnippet(doc.snippet.to_string()))
+            .padding([2, 6])
+            .style(ide_secondary_button);
 
             let mut card_col = column![
                 row![
-                    text(doc.name).size(12).style(primary_style),
+                    text(doc.name)
+                        .size(14)
+                        .wrapping(iced::widget::text::Wrapping::None)
+                        .style(primary_style),
                     Space::new().width(Fill),
-                    text(doc.category).size(10).style(muted_style),
-                    Space::new().width(Length::Fixed(6.0)),
+                    text(doc.category)
+                        .size(12)
+                        .wrapping(iced::widget::text::Wrapping::None)
+                        .style(muted_style),
                     insert_btn,
                 ]
+                .spacing(8)
                 .align_y(iced::Center),
-                text(doc.signature).size(11).font(iced::Font::MONOSPACE).style(muted_style),
-                text(doc.description).size(11),
+                text(doc.signature)
+                    .size(13)
+                    .font(iced::Font::MONOSPACE)
+                    .wrapping(iced::widget::text::Wrapping::None)
+                    .style(muted_style),
+                text(doc.description)
+                    .size(13)
+                    .wrapping(iced::widget::text::Wrapping::None),
             ]
             .spacing(3);
 
             if let Some(dxf) = doc.dxf_summary {
                 let dxf_box = container(
                     text(dxf)
-                        .size(10)
+                        .size(12)
                         .font(iced::Font::MONOSPACE)
+                        .wrapping(iced::widget::text::Wrapping::None)
                         .style(|_t: &Theme| text::Style {
                             color: Some(iced::Color::from_rgb(0.78, 0.86, 0.96)),
                         })
@@ -3610,6 +3752,7 @@ fn render_ide_layout<'a>(
             }
 
             let card = container(card_col)
+            .width(Fill)
             .padding(6)
             .style(move |t: &Theme| {
                 let p = t.palette();
@@ -3630,21 +3773,32 @@ fn render_ide_layout<'a>(
         let drawer_container = container(
             column![
                 row![
-                    text("λ AutoLISP Function List & Reference").size(14).style(primary_style),
+                    text("λ AutoLISP Function List & Reference")
+                        .size(15)
+                        .wrapping(iced::widget::text::Wrapping::None)
+                        .style(primary_style),
                     Space::new().width(Fill),
-                    button(text("✕").size(12))
+                    button(text("✕").size(14))
                         .on_press(IdeMessage::ToggleApiDrawer)
                         .padding([2, 6])
                         .style(button::text),
                 ]
+                .spacing(6)
                 .align_y(iced::Center),
                 hsep(),
-                scrollable(api_list).height(Fill),
+                search_box,
+                scrollable(api_list)
+                    .direction(scrollable::Direction::Both {
+                        vertical: scrollable::Scrollbar::default(),
+                        horizontal: scrollable::Scrollbar::default(),
+                    })
+                    .width(Fill)
+                    .height(Fill),
             ]
             .spacing(6)
             .padding(6),
         )
-        .width(Length::Fixed(340.0))
+        .width(Length::Fixed(400.0))
         .height(Fill)
         .style(move |_t: &Theme| {
             container::Style {
@@ -3731,6 +3885,56 @@ fn render_ide_layout<'a>(
     };
 
     let mut full_stack = stack![base_element];
+
+    if help_menu_open {
+        let dismiss_backdrop = mouse_area(
+            container(Space::new())
+                .width(Fill)
+                .height(Fill),
+        )
+        .on_press(IdeMessage::ToggleHelpMenu);
+
+        let help_menu = container(
+            column![
+                button(
+                    row![
+                        text("Tutorials").size(13),
+                    ]
+                    .align_y(iced::Center),
+                )
+                .on_press(IdeMessage::OpenTutorials)
+                .width(Fill)
+                .padding([6, 12])
+                .style(ide_secondary_button),
+            ]
+            .spacing(4)
+            .width(Length::Fixed(170.0)),
+        )
+        .padding(6)
+        .style(|_t: &Theme| container::Style {
+            background: Some(Background::Color(iced::Color::from_rgb(0.16, 0.17, 0.20))),
+            border: Border {
+                color: IDE_DARK_GRAY,
+                width: 1.0,
+                radius: 6.0.into(),
+            },
+            ..Default::default()
+        });
+
+        let menu_overlay = container(help_menu)
+            .width(Fill)
+            .height(Fill)
+            .align_x(iced::alignment::Horizontal::Right)
+            .align_y(iced::alignment::Vertical::Top)
+            .padding(iced::Padding {
+                top: 42.0,
+                right: 64.0,
+                bottom: 0.0,
+                left: 0.0,
+            });
+
+        full_stack = full_stack.push(dismiss_backdrop).push(menu_overlay);
+    }
 
     if settings_open {
         let blocker = mouse_area(
@@ -3975,6 +4179,7 @@ mod tests {
             40,
             &settings,
             false,
+            false,
             SettingsTab::General,
             SyntaxColorTarget::Background,
             "#202225",
@@ -4017,6 +4222,7 @@ mod tests {
             40,
             &settings,
             true,
+            false,
             SettingsTab::EditorSyntax,
             SyntaxColorTarget::CustomFunction,
             "#82AAFF",
@@ -4056,6 +4262,7 @@ mod tests {
             40,
             &settings,
             true,
+            false,
             SettingsTab::Formatting,
             SyntaxColorTarget::Background,
             "#202225",
@@ -4098,6 +4305,7 @@ mod tests {
             false,
             40,
             &settings,
+            false,
             false,
             SettingsTab::General,
             SyntaxColorTarget::Background,

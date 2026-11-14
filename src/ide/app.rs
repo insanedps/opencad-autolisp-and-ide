@@ -50,6 +50,7 @@ pub struct IdeApp {
     pub autocomplete_matches: Vec<String>,
     pub settings: IdeSettings,
     pub settings_open: bool,
+    pub help_menu_open: bool,
     pub settings_tab: SettingsTab,
     pub active_color_target: SyntaxColorTarget,
     pub syntax_hex_input: String,
@@ -65,6 +66,53 @@ pub struct IdeApp {
     pub find_replace: FindReplaceState,
     pub client: IdeClient,
     pub rx: Option<Receiver<PluginToIde>>,
+}
+
+/// Locate `tutorials/index.html` next to the running executable, in parent
+/// directories (for `target/{debug,release}` runs), or in the crate root.
+fn find_tutorials_index() -> Option<std::path::PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        let mut dir = exe.parent();
+        for _ in 0..4 {
+            let Some(d) = dir else { break };
+            let candidate = d.join("tutorials").join("index.html");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+            dir = d.parent();
+        }
+    }
+
+    let manifest_candidate = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tutorials")
+        .join("index.html");
+    if manifest_candidate.is_file() {
+        return Some(manifest_candidate);
+    }
+
+    None
+}
+
+/// Open a local HTML file in the user's default web browser.
+fn open_in_browser(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(path)
+            .spawn()?;
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(path).spawn()?;
+        return Ok(());
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open").arg(path).spawn()?;
+        return Ok(());
+    }
 }
 
 impl IdeApp {
@@ -119,7 +167,7 @@ impl IdeApp {
 
     pub fn visible_lines(&self) -> usize {
         let line_height = (self.settings.font_size() as f32 * 1.6).round().max(16.0);
-        const CHROME_HEIGHT: f32 = 96.0;
+        const CHROME_HEIGHT: f32 = 136.0;
         let editor_height = (self.window_height - (CHROME_HEIGHT + self.console_height)).max(60.0);
         ((editor_height / line_height).floor() as usize).max(1)
     }
@@ -470,6 +518,7 @@ impl IdeApp {
             autocomplete_matches: Vec::new(),
             settings,
             settings_open: false,
+            help_menu_open: false,
             settings_tab: SettingsTab::General,
             active_color_target,
             syntax_hex_input,
@@ -864,7 +913,7 @@ impl IdeApp {
                 let visible_lines = self.visible_lines();
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                     if let text_editor::Action::Scroll { lines } = action {
-                        // 1. Preserve the user's editing cursor before scrolling away
+                        // 1. Preserve the user's editing cursor (including any active selection!) before scrolling away
                         if !tab.is_scrolling_away {
                             tab.last_edit_cursor = Some(tab.content.cursor());
                         }
@@ -886,16 +935,27 @@ impl IdeApp {
                         }
 
                         if next <= edit_line && edit_line < next + visible_lines {
-                            // User's actual cursor is now ON-SCREEN!
-                            tab.scroll_to_line_exact(next, edit_line, edit_cursor.position.column, visible_lines);
+                            // User's actual cursor (and any active selection) is now ON-SCREEN!
+                            tab.scroll_viewport_exact(next, edit_cursor, visible_lines, true);
                             tab.is_scrolling_away = false;
-                            // Focus editor so the caret at edit_cursor blinks
+                            // Focus editor so the caret & selection at edit_cursor render natively
                             return iced::widget::operation::focus(crate::ide::view::EDITOR_ID);
                         } else {
-                            // User's actual cursor is OFF-SCREEN!
-                            tab.scroll_to_line_exact(next, next, 0, visible_lines);
+                            // User's actual cursor is OFF-SCREEN: keep edit_cursor (and its selection!) untouched in last_edit_cursor
+                            tab.scroll_viewport_exact(
+                                next,
+                                text_editor::Cursor {
+                                    position: text_editor::Position {
+                                        line: next,
+                                        column: 0,
+                                    },
+                                    selection: None,
+                                },
+                                visible_lines,
+                                false,
+                            );
                             tab.is_scrolling_away = true;
-                            // Unfocus editor so the caret quad DISAPPEARS completely!
+                            // Unfocus editor so the caret quad DISAPPEARS completely (view renders selection overlay if selected)
                             return iced::advanced::widget::operate(
                                 iced::advanced::widget::operation::focusable::unfocus::<IdeMessage>(),
                             );
@@ -918,7 +978,14 @@ impl IdeApp {
                             }
                             tab.is_scrolling_away = false;
                         }
-                    } else if matches!(action, text_editor::Action::Click(_) | text_editor::Action::SelectWord | text_editor::Action::SelectLine) {
+                    } else if matches!(
+                        action,
+                        text_editor::Action::Click(_)
+                            | text_editor::Action::Drag(_)
+                            | text_editor::Action::SelectWord
+                            | text_editor::Action::SelectLine
+                            | text_editor::Action::SelectAll
+                    ) {
                         tab.is_scrolling_away = false;
                         tab.last_edit_cursor = None;
                     } else if matches!(action, text_editor::Action::Move(_)) && tab.is_scrolling_away {
@@ -935,6 +1002,7 @@ impl IdeApp {
 
                     if matches!(action, text_editor::Action::SelectWord) && tab.is_lisp() {
                         if Self::select_word_matching_paren(&mut tab.content) {
+                            tab.last_edit_cursor = Some(tab.content.cursor());
                             return Task::none();
                         }
                     }
@@ -971,11 +1039,22 @@ impl IdeApp {
                     let target = target_line.clamp(0, max_scroll);
 
                     if target <= edit_line && edit_line < target + visible_lines {
-                        tab.scroll_to_line_exact(target, edit_line, edit_cursor.position.column, visible_lines);
+                        tab.scroll_viewport_exact(target, edit_cursor, visible_lines, true);
                         tab.is_scrolling_away = false;
                         return iced::widget::operation::focus(crate::ide::view::EDITOR_ID);
                     } else {
-                        tab.scroll_to_line_exact(target, target, 0, visible_lines);
+                        tab.scroll_viewport_exact(
+                            target,
+                            text_editor::Cursor {
+                                position: text_editor::Position {
+                                    line: target,
+                                    column: 0,
+                                },
+                                selection: None,
+                            },
+                            visible_lines,
+                            false,
+                        );
                         tab.is_scrolling_away = true;
                         return iced::advanced::widget::operate(
                             iced::advanced::widget::operation::focusable::unfocus::<IdeMessage>(),
@@ -1331,6 +1410,7 @@ impl IdeApp {
             }
             IdeMessage::FormatDocument => {
                 self.active_editor_focus = ActiveEditorFocus::Main;
+                let visible_lines = self.visible_lines();
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                     if tab.is_scrolling_away {
                         if let Some(saved) = tab.last_edit_cursor.take() {
@@ -1360,14 +1440,17 @@ impl IdeApp {
                             },
                             selection: None,
                         };
-                        tab.content.move_to(new_cursor);
-                        tab.scroll_top_line = saved_scroll;
-                        if saved_scroll > 0 {
-                            tab.content.perform(text_editor::Action::Scroll {
-                                lines: saved_scroll as i32,
-                            });
+                        let max_scroll = total.saturating_sub(visible_lines.max(1));
+                        let target_scroll = if target_line < saved_scroll {
+                            target_line
+                        } else if target_line >= saved_scroll + visible_lines {
+                            target_line.saturating_sub(visible_lines / 2)
+                        } else {
+                            saved_scroll
                         }
-                        tab.last_edit_cursor = Some(new_cursor);
+                        .min(max_scroll);
+                        tab.scroll_viewport_exact(target_scroll, new_cursor, visible_lines, true);
+                        tab.is_scrolling_away = false;
                         tab.dirty = true;
                     }
                     return iced::widget::operation::focus(crate::ide::view::EDITOR_ID);
@@ -1415,6 +1498,7 @@ impl IdeApp {
                 }
 
                 self.active_editor_focus = ActiveEditorFocus::Main;
+                let visible_lines = self.visible_lines();
 
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                     if tab.is_scrolling_away {
@@ -1493,14 +1577,18 @@ impl IdeApp {
                             }
                         };
 
-                        tab.content.move_to(new_cursor);
-                        tab.scroll_top_line = saved_scroll;
-                        if saved_scroll > 0 {
-                            tab.content.perform(text_editor::Action::Scroll {
-                                lines: saved_scroll as i32,
-                            });
+                        let max_scroll = total.saturating_sub(visible_lines.max(1));
+                        let target_line = new_cursor.position.line;
+                        let target_scroll = if target_line < saved_scroll {
+                            target_line
+                        } else if target_line >= saved_scroll + visible_lines {
+                            target_line.saturating_sub(visible_lines / 2)
+                        } else {
+                            saved_scroll
                         }
-                        tab.last_edit_cursor = Some(new_cursor);
+                        .min(max_scroll);
+                        tab.scroll_viewport_exact(target_scroll, new_cursor, visible_lines, true);
+                        tab.is_scrolling_away = false;
                         tab.dirty = true;
                     }
                     return iced::widget::operation::focus(crate::ide::view::EDITOR_ID);
@@ -1726,9 +1814,25 @@ impl IdeApp {
                 Task::none()
             }
             IdeMessage::ToggleSettings => {
+                self.help_menu_open = false;
                 self.settings_open = !self.settings_open;
                 if !self.settings_open {
                     self.refresh_editor_highlighting();
+                }
+                Task::none()
+            }
+            IdeMessage::ToggleHelpMenu => {
+                self.help_menu_open = !self.help_menu_open;
+                Task::none()
+            }
+            IdeMessage::OpenTutorials => {
+                self.help_menu_open = false;
+                if let Some(path) = find_tutorials_index() {
+                    if let Err(err) = open_in_browser(&path) {
+                        self.append_to_console(&format!("Failed to open tutorials ({}): {err}\n", path.display()));
+                    }
+                } else {
+                    self.append_to_console("Tutorials index.html not found.\n");
                 }
                 Task::none()
             }
@@ -2097,7 +2201,13 @@ impl IdeApp {
                     let total = tab.content.line_count().max(1);
                     let max_scroll = total.saturating_sub(visible_lines);
                     if tab.scroll_top_line > max_scroll {
-                        tab.scroll_top_line = max_scroll;
+                        let cursor = tab.content.cursor();
+                        tab.scroll_viewport_exact(
+                            max_scroll,
+                            cursor,
+                            visible_lines,
+                            !tab.is_scrolling_away,
+                        );
                     }
                 }
                 Task::none()
@@ -2212,10 +2322,38 @@ impl IdeApp {
             IdeMessage::SplitterRelease => {
                 self.is_splitter_dragging = false;
                 self.splitter_last_y = None;
+                let visible_lines = self.visible_lines();
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    let total = tab.content.line_count().max(1);
+                    let max_scroll = total.saturating_sub(visible_lines);
+                    if tab.scroll_top_line > max_scroll {
+                        let cursor = tab.content.cursor();
+                        tab.scroll_viewport_exact(
+                            max_scroll,
+                            cursor,
+                            visible_lines,
+                            !tab.is_scrolling_away,
+                        );
+                    }
+                }
                 Task::none()
             }
             IdeMessage::SplitterReset => {
                 self.console_height = 220.0;
+                let visible_lines = self.visible_lines();
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    let total = tab.content.line_count().max(1);
+                    let max_scroll = total.saturating_sub(visible_lines);
+                    if tab.scroll_top_line > max_scroll {
+                        let cursor = tab.content.cursor();
+                        tab.scroll_viewport_exact(
+                            max_scroll,
+                            cursor,
+                            visible_lines,
+                            !tab.is_scrolling_away,
+                        );
+                    }
+                }
                 Task::none()
             }
             IdeMessage::DebugStart => {
@@ -2313,8 +2451,22 @@ impl IdeApp {
                 }
             }
             IdeMessage::Undo => {
+                let visible_lines = self.visible_lines();
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                     if tab.undo() {
+                        let cursor = tab.content.cursor();
+                        let total = tab.content.line_count().max(1);
+                        let max_scroll = total.saturating_sub(visible_lines.max(1));
+                        let target_scroll = if cursor.position.line < tab.scroll_top_line {
+                            cursor.position.line
+                        } else if cursor.position.line >= tab.scroll_top_line + visible_lines {
+                            cursor.position.line.saturating_sub(visible_lines / 2)
+                        } else {
+                            tab.scroll_top_line
+                        }
+                        .min(max_scroll);
+                        tab.scroll_viewport_exact(target_scroll, cursor, visible_lines, true);
+                        tab.is_scrolling_away = false;
                         self.refresh_find_matches();
                         self.refresh_autocomplete_matches();
                     }
@@ -2322,8 +2474,22 @@ impl IdeApp {
                 Task::none()
             }
             IdeMessage::Redo => {
+                let visible_lines = self.visible_lines();
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                     if tab.redo() {
+                        let cursor = tab.content.cursor();
+                        let total = tab.content.line_count().max(1);
+                        let max_scroll = total.saturating_sub(visible_lines.max(1));
+                        let target_scroll = if cursor.position.line < tab.scroll_top_line {
+                            cursor.position.line
+                        } else if cursor.position.line >= tab.scroll_top_line + visible_lines {
+                            cursor.position.line.saturating_sub(visible_lines / 2)
+                        } else {
+                            tab.scroll_top_line
+                        }
+                        .min(max_scroll);
+                        tab.scroll_viewport_exact(target_scroll, cursor, visible_lines, true);
+                        tab.is_scrolling_away = false;
                         self.refresh_find_matches();
                         self.refresh_autocomplete_matches();
                     }
@@ -2673,6 +2839,7 @@ impl IdeApp {
             self.visible_lines(),
             &self.settings,
             self.settings_open,
+            self.help_menu_open,
             self.settings_tab,
             self.active_color_target,
             &self.syntax_hex_input,
@@ -3289,5 +3456,98 @@ mod tests {
         )));
         assert_eq!(app.debug_locals.len(), 1);
         assert!(app.watch_vars.iter().any(|w| app.debug_locals.iter().any(|(n, _, _)| n.eq_ignore_ascii_case(w))));
+    }
+
+    #[test]
+    fn test_selection_preserved_when_scrolling_on_and_off_screen() {
+        let (mut app, _) = IdeApp::new();
+        let long_code: String = (0..200)
+            .map(|i| format!("(setq var_{i} (+ {i} 1))"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Some(tab) = app.tabs.get_mut(app.active_tab) {
+            tab.content = text_editor::Content::with_text(&long_code);
+            tab.content.move_to(text_editor::Cursor {
+                position: text_editor::Position { line: 5, column: 12 },
+                selection: Some(text_editor::Position { line: 5, column: 6 }),
+            });
+            tab.last_edit_cursor = Some(tab.content.cursor());
+        }
+
+        let visible_lines = app.visible_lines();
+        assert!(visible_lines > 5);
+
+        // 1. Scroll 2 lines down while cursor/selection line 5 stays visible on-screen
+        let _ = app.update(IdeMessage::EditorAction(text_editor::Action::Scroll { lines: 2 }));
+        {
+            let tab = &app.tabs[app.active_tab];
+            assert!(!tab.is_scrolling_away);
+            assert_eq!(tab.scroll_top_line, 2);
+            let cur = tab.content.cursor();
+            assert_eq!(cur.position, text_editor::Position { line: 5, column: 12 });
+            assert_eq!(cur.selection, Some(text_editor::Position { line: 5, column: 6 }));
+        }
+
+        // 2. Scroll far enough down that line 5 goes completely off-screen
+        let _ = app.update(IdeMessage::EditorAction(text_editor::Action::Scroll { lines: 20 }));
+        {
+            let tab = &app.tabs[app.active_tab];
+            assert!(tab.is_scrolling_away);
+            assert_eq!(tab.scroll_top_line, 22);
+            // Saved edit cursor retains the active selection while scrolled away
+            let saved = tab.last_edit_cursor.expect("last_edit_cursor preserved");
+            assert_eq!(saved.position, text_editor::Position { line: 5, column: 12 });
+            assert_eq!(saved.selection, Some(text_editor::Position { line: 5, column: 6 }));
+        }
+
+        // 3. Scroll back up until line 5 returns to the viewport
+        let _ = app.update(IdeMessage::EditorAction(text_editor::Action::Scroll { lines: -20 }));
+        {
+            let tab = &app.tabs[app.active_tab];
+            assert!(!tab.is_scrolling_away);
+            assert_eq!(tab.scroll_top_line, 2);
+            let cur = tab.content.cursor();
+            assert_eq!(cur.position, text_editor::Position { line: 5, column: 12 });
+            assert_eq!(cur.selection, Some(text_editor::Position { line: 5, column: 6 }));
+        }
+    }
+
+    #[test]
+    fn test_find_and_paused_scroll_on_unrendered_content() {
+        let (mut app, _) = IdeApp::new();
+        let long_code: String = (0..250)
+            .map(|i| {
+                if i == 150 {
+                    "(setq target_needle 42)".to_string()
+                } else {
+                    format!("(setq filler_{i} {i})")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Some(tab) = app.tabs.get_mut(app.active_tab) {
+            tab.content = text_editor::Content::with_text(&long_code);
+        }
+
+        let visible_lines = app.visible_lines();
+
+        // Find navigates to match on line 150 (never laid out yet)
+        let _ = app.update(IdeMessage::FindQueryChanged("target_needle".to_string()));
+        {
+            let tab = &app.tabs[app.active_tab];
+            assert!(!tab.is_scrolling_away);
+            assert_eq!(tab.content.cursor().position.line, 150);
+            assert!(tab.scroll_top_line <= 150 && 150 < tab.scroll_top_line + visible_lines);
+            assert!(tab.content.cursor().selection.is_some());
+        }
+
+        // ReplaceCurrent on match resets Content::with_text (height_opt == None) and keeps position synced
+        let _ = app.update(IdeMessage::ReplaceQueryChanged("target_updated".to_string()));
+        let _ = app.update(IdeMessage::ReplaceCurrent);
+        {
+            let tab = &app.tabs[app.active_tab];
+            assert_eq!(tab.content.cursor().position.line, 150);
+            assert!(tab.scroll_top_line <= 150 && 150 < tab.scroll_top_line + visible_lines);
+        }
     }
 }

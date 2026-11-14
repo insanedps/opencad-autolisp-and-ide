@@ -736,6 +736,57 @@ impl IdeTab {
     ///    cosmic-text executes: scroll.line = target_top; scroll.vertical = 0.0;
     /// 4. Position cursor at clamped_line within [target_top, target_top + visible_lines)
     ///    so cosmic-text during draw will neither clamp backwards nor clamp forwards.
+    /// Low-level exact viewport scroll helper.
+    /// Positions `scroll.line` at `target_top_line` (clamped to `max_scroll`) using
+    /// top-down scrolling so it remains deterministic even before first layout
+    /// (`height_opt == None` after `Content::with_text` or tab switch), then places
+    /// the editor cursor/selection and updates `scroll_top_line`.
+    pub fn scroll_viewport_exact(
+        &mut self,
+        target_top_line: usize,
+        cursor: text_editor::Cursor,
+        visible_lines: usize,
+        update_last_edit_cursor: bool,
+    ) {
+        let total = self.content.line_count().max(1);
+        let max_scroll = total.saturating_sub(visible_lines.max(1));
+        let target_top = target_top_line.min(max_scroll);
+
+        // 1. Reset cosmic-text scroll deterministically to line 0 regardless of height_opt
+        self.content.perform(text_editor::Action::Move(text_editor::Motion::DocumentStart));
+        self.content.perform(text_editor::Action::Scroll { lines: -100_000 });
+
+        // 2. Advance scroll.line to target_top without relying on DocumentEnd (which is a no-op when height_opt is None)
+        if target_top > 0 {
+            self.content.move_to(text_editor::Cursor {
+                position: text_editor::Position {
+                    line: target_top,
+                    column: 0,
+                },
+                selection: None,
+            });
+            self.content.perform(text_editor::Action::Scroll { lines: target_top as i32 });
+        }
+
+        self.scroll_top_line = target_top;
+
+        // 3. Position cursor (and optional selection) comfortably within [target_top, target_top + visible_lines)
+        let clamped_line = cursor.position.line.clamp(
+            target_top,
+            (target_top + visible_lines.saturating_sub(1)).min(total.saturating_sub(1)),
+        );
+        self.content.move_to(text_editor::Cursor {
+            position: text_editor::Position {
+                line: clamped_line,
+                column: cursor.position.column,
+            },
+            selection: cursor.selection,
+        });
+        if update_last_edit_cursor {
+            self.last_edit_cursor = Some(self.content.cursor());
+        }
+    }
+
     pub fn scroll_to_line_exact(
         &mut self,
         target_top_line: usize,
@@ -743,45 +794,18 @@ impl IdeTab {
         cursor_col: usize,
         visible_lines: usize,
     ) {
-        let total = self.content.line_count().max(1);
-        let max_scroll = total.saturating_sub(visible_lines.max(1));
-        let target_top = target_top_line.min(max_scroll);
-
-        if total > visible_lines && target_top > 0 {
-            // 1. Force cosmic-text's scroll.line past target_top
-            self.content.perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
-        } else {
-            // Document fits in viewport or target is top line 0
-            self.content.perform(text_editor::Action::Move(text_editor::Motion::DocumentStart));
-            self.content.perform(text_editor::Action::Scroll { lines: -100_000 });
-        }
-
-        // 2. Position cursor at target_top
-        self.content.move_to(text_editor::Cursor {
-            position: text_editor::Position {
-                line: target_top,
-                column: 0,
+        self.scroll_viewport_exact(
+            target_top_line,
+            text_editor::Cursor {
+                position: text_editor::Position {
+                    line: cursor_line,
+                    column: cursor_col,
+                },
+                selection: None,
             },
-            selection: None,
-        });
-
-        // 3. Trigger shape_until_cursor backwards-clamp to lock scroll.line = target_top and scroll.vertical = 0.0
-        self.content.perform(text_editor::Action::Scroll { lines: 0 });
-        self.scroll_top_line = target_top;
-
-        // 4. Position cursor comfortably within [target_top, target_top + visible_lines)
-        let clamped_line = cursor_line.clamp(
-            target_top,
-            (target_top + visible_lines.saturating_sub(1)).min(total.saturating_sub(1)),
+            visible_lines,
+            true,
         );
-        self.content.move_to(text_editor::Cursor {
-            position: text_editor::Position {
-                line: clamped_line,
-                column: cursor_col,
-            },
-            selection: None,
-        });
-        self.last_edit_cursor = Some(self.content.cursor());
         self.is_scrolling_away = false;
     }
 
@@ -798,40 +822,25 @@ impl IdeTab {
         let total = self.content.line_count().max(1);
         let max_scroll = total.saturating_sub(visible_lines.max(1));
         let target_top = target_top_line.min(max_scroll);
-
-        if total > visible_lines && target_top > 0 {
-            self.content.perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
-        } else {
-            self.content.perform(text_editor::Action::Move(text_editor::Motion::DocumentStart));
-            self.content.perform(text_editor::Action::Scroll { lines: -100_000 });
-        }
-
-        self.content.move_to(text_editor::Cursor {
-            position: text_editor::Position {
-                line: target_top,
-                column: 0,
-            },
-            selection: None,
-        });
-
-        self.content.perform(text_editor::Action::Scroll { lines: 0 });
-        self.scroll_top_line = target_top;
-
         let clamped_line = cursor_line.clamp(
             target_top,
             (target_top + visible_lines.saturating_sub(1)).min(total.saturating_sub(1)),
         );
-        self.content.move_to(text_editor::Cursor {
-            position: text_editor::Position {
-                line: clamped_line,
-                column: cursor_col,
+        self.scroll_viewport_exact(
+            target_top,
+            text_editor::Cursor {
+                position: text_editor::Position {
+                    line: clamped_line,
+                    column: cursor_col,
+                },
+                selection: Some(text_editor::Position {
+                    line: clamped_line,
+                    column: selection_start_col,
+                }),
             },
-            selection: Some(text_editor::Position {
-                line: clamped_line,
-                column: selection_start_col,
-            }),
-        });
-        self.last_edit_cursor = Some(self.content.cursor());
+            visible_lines,
+            true,
+        );
         self.is_scrolling_away = false;
     }
 }
@@ -913,6 +922,8 @@ pub enum IdeMessage {
     InsertSnippet(String),
     ToggleVariables,
     ToggleSettings,
+    ToggleHelpMenu,
+    OpenTutorials,
     SetSettingsTab(SettingsTab),
     SetEditorFont(Option<String>),
     SetEditorFontSize(u8),
