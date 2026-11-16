@@ -1507,10 +1507,10 @@ pub const API_DOCS: &[ApiDoc] = &[
         description: "Registers a persistent dockable side panel in OpenCAD Studio. Parameters:
 - panel-id (string | symbol): Unique panel ID
 - title (string | symbol): Header title on panel tab
-- [options] (optional alist): '((width . 260.0) (command . \"MYCMD\"))
+- [options] (optional alist): '((width . 260.0) (command . \"MYCMD\") (style . \"dialog\")) — style can be \"palette\" (default Properties-grid style) or \"dialog\" / \"form\" (dialog-like form style)
 - ctrl1 [ctrl2 ...] (controls): Controls placed vertically in panel",
         snippet: "(oca-panel-register \"my_panel\" \"Tools\"
-  '((width . 260.0))
+  '((width . 260.0) (style . \"dialog\"))
   (oca-choice \"col\" \"Color\" '(\"Red\" \"Blue\") \"Red\")
   (oca-button \"btn\" \"Execute\" \"(c:run)\")
 )

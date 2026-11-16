@@ -67,10 +67,10 @@
     <p>This tutorial builds a dockable AutoLISP side panel where users enter X/Y coordinates, add them to a table, pick a color and entity type (<strong>Lines</strong> or <strong>Circles</strong>), and draw them into the active drawing.</p>
 
     <h2>Step 1: Register the Panel Layout</h2>
-    <p>Use <code>oca-panel-register</code> to define the panel ID, title, options, and controls. Each button uses an explicit <code>'((action . "(func)"))</code> so clicking it evaluates a regular AutoLISP <code>defun</code> directly.</p>
+    <p>Use <code>oca-panel-register</code> to define the panel ID, title, options (such as <code>width</code>, <code>command</code>, and <code>style</code>), and controls. Setting <code>(style . "dialog")</code> renders controls in the dialog-like form style (omit or use <code>"palette"</code> for the Properties-grid style). Each button uses an explicit <code>'((action . "(func)"))</code> so clicking it evaluates a regular AutoLISP <code>defun</code> directly.</p>
 <pre><code>(defun c:coordpanel ()
   (oca-panel-register "coord_panel" "Coordinate Drawer"
-    '((width . 320) (command . "COORDPANEL"))
+    '((width . 320) (command . "COORDPANEL") (style . "dialog"))
 
     (oca-info "lbl_status" "Enter X, Y and click Add Point.")
 
