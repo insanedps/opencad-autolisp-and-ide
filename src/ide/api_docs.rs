@@ -125,8 +125,32 @@ pub const API_DOCS: &[ApiDoc] = &[
     ApiDoc {
         name: "command",
         signature: "(command [cmd-token1 ...]) -> nil",
-        description: "Executes CAD host commands step-by-step. Supports point lists, strings, PAUSE, and \"\" for Enter.",
+        description: "Executes CAD host commands step-by-step. Dual-mode commands automatically run their command-line (-) variant unless (initdia 1) is called first. Supports point lists, strings, PAUSE, and \"\" for Enter.",
         snippet: "(command \"_.LINE\" '(0 0 0) '(100 50 0) \"\")\n",
+        category: "CAD Commands",
+        dxf_summary: None,
+    },
+    ApiDoc {
+        name: "command-s",
+        signature: "(command-s [cmd-token1 ...]) -> nil",
+        description: "Synchronously executes CAD host commands using command-line mode by default unless (initdia 1) is called first.",
+        snippet: "(command-s \"_.LAYER\" \"_M\" \"Walls\" \"\")\n",
+        category: "CAD Commands",
+        dxf_summary: None,
+    },
+    ApiDoc {
+        name: "vl-cmdf",
+        signature: "(vl-cmdf [cmd-token1 ...]) -> T | nil",
+        description: "Evaluates all arguments and executes CAD host commands step-by-step, returning T when completed. Dual-mode commands run their command-line (-) variant unless (initdia 1) is called.",
+        snippet: "(vl-cmdf \"_.INSERT\" \"MyBlock\" '(0 0 0) 1 1 0)\n",
+        category: "CAD Commands",
+        dxf_summary: None,
+    },
+    ApiDoc {
+        name: "initdia",
+        signature: "(initdia [dialogflag]) -> nil",
+        description: "Forces the next CAD command invoked by (command ...) to display its GUI dialog box when dialogflag is omitted or non-zero, or suppresses it when 0 or nil.",
+        snippet: "(initdia 1)\n(command \"LAYER\")\n",
         category: "CAD Commands",
         dxf_summary: None,
     },
@@ -253,7 +277,31 @@ pub const API_DOCS: &[ApiDoc] = &[
         dxf_summary: None,
     },
 
-    // ── 4. Selection Sets (ss*) ─────────────────────────────────────────────
+    // ── 4. Selection Sets (ss*) & Entity Picking ────────────────────────────
+    ApiDoc {
+        name: "entsel",
+        signature: "(entsel [prompt-str]) -> (ename (x y z)) | nil",
+        description: "Prompts the user to select a single entity in the viewport and returns a list containing the entity name (ENAME) and the 3D pick point coordinates, or nil on Enter/cancel.",
+        snippet: "(if (setq sel (entsel \"\\nSelect object: \"))\n  (progn\n    (setq ent (car sel))\n    (setq pt  (cadr sel))\n    (entget ent)\n  )\n)\n",
+        category: "Selection Sets",
+        dxf_summary: None,
+    },
+    ApiDoc {
+        name: "nentsel",
+        signature: "(nentsel [prompt-str]) -> (ename (x y z)) | nil",
+        description: "Prompts the user to select a single entity or nested subentity in the viewport and returns its entity name and pick point coordinates, or nil on cancel.",
+        snippet: "(if (setq sel (nentsel \"\\nSelect entity: \"))\n  (entget (car sel))\n)\n",
+        category: "Selection Sets",
+        dxf_summary: None,
+    },
+    ApiDoc {
+        name: "nentselp",
+        signature: "(nentselp [prompt-str] [pt]) -> (ename (x y z)) | nil",
+        description: "Prompts the user to select an entity or nested subentity (with optional prompt string and pick point) and returns its entity name and pick point, or nil.",
+        snippet: "(if (setq sel (nentselp \"\\nSelect entity: \"))\n  (car sel)\n)\n",
+        category: "Selection Sets",
+        dxf_summary: None,
+    },
     ApiDoc {
         name: "ssget",
         signature: "(ssget [mode] [pt1 [pt2]] [filter-alist]) -> pickset | nil",

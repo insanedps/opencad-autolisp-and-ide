@@ -285,6 +285,114 @@ pub fn send_host_keepalive() {
     }
 }
 
+fn finish_interactive_or_eval(
+    eval_res: Result<Value, LispError>,
+    buffered: String,
+    resp: Option<std::sync::mpsc::Sender<Result<Option<String>, String>>>,
+    worker_tx: Option<&std::sync::mpsc::Sender<WorkerMsg>>,
+    global_bridge: &Arc<Mutex<OpenCadRustBridge>>,
+) {
+    global_bridge.lock().unwrap().reset_stream();
+
+    if let Some(active) = active_interactive() {
+        match eval_res {
+            Ok(val) => {
+                let output = if val == Value::Nil {
+                    if buffered.is_empty() {
+                        None
+                    } else {
+                        Some(buffered)
+                    }
+                } else if resp.is_some() {
+                    let val_str = format!("{}", val);
+                    if buffered.is_empty() {
+                        Some(val_str)
+                    } else {
+                        Some(format!("{}{}", buffered, val_str))
+                    }
+                } else if buffered.is_empty() {
+                    None
+                } else {
+                    Some(buffered)
+                };
+                active.finish();
+                if let Some(msg) = output {
+                    if let Some(s) = crate::context::get_global_sender() {
+                        std::thread::spawn(move || {
+                            let _ = s.request(ocs_plugin_api::ipc::protocol::PluginRequest::PushOutput(msg));
+                        });
+                    }
+                }
+            }
+            Err(ref e) => {
+                if !buffered.is_empty() {
+                    if let Some(s) = crate::context::get_global_sender() {
+                        std::thread::spawn(move || {
+                            let _ = s.request(ocs_plugin_api::ipc::protocol::PluginRequest::PushOutput(buffered));
+                        });
+                    }
+                }
+                let err = format_and_store_eval_error(e);
+                if crate::ide::server::has_active_clients() {
+                    crate::ide::server::ide_log(
+                        &format!("\n[AutoLISP Error] {err}\n"),
+                        true,
+                    );
+                }
+                let cmdline = get_last_lisp_cmdline_error().unwrap_or_else(|| {
+                    err.lines().next().unwrap_or(err.as_str()).to_string()
+                });
+                let err_msg = format_cmdline_with_prefix("AutoLISP Error", &cmdline);
+                active.fail(&err_msg);
+                if let Some(s) = crate::context::get_global_sender() {
+                    std::thread::spawn(move || {
+                        let _ = s.request(ocs_plugin_api::ipc::protocol::PluginRequest::PushError(err_msg));
+                    });
+                }
+            }
+        }
+        set_active_interactive(None);
+        flush_deferred_setvars(global_bridge);
+        return;
+    }
+
+    if let Some(tx) = resp {
+        let res = match eval_res {
+            Ok(val) => {
+                let combined = if val == Value::Nil {
+                    if buffered.is_empty() {
+                        None
+                    } else {
+                        Some(buffered)
+                    }
+                } else {
+                    let val_str = format!("{}", val);
+                    if buffered.is_empty() {
+                        Some(val_str)
+                    } else {
+                        Some(format!("{}{}", buffered, val_str))
+                    }
+                };
+                Ok(combined)
+            }
+            Err(e) => {
+                if !buffered.is_empty() {
+                    let _ = with_host(|h| h.push_output(&buffered));
+                }
+                Err(format_and_store_eval_error(&e))
+            }
+        };
+        let _ = tx.send(res);
+    } else if let Some(wtx) = worker_tx {
+        if !buffered.is_empty() {
+            let _ = with_host(|h| h.push_output(&buffered));
+        }
+        let _ = wtx.send(WorkerMsg::Finished(
+            eval_res.map(|_| ()).map_err(|e| format_and_store_eval_error(&e)),
+        ));
+    }
+}
+
 fn get_task_tx() -> &'static std::sync::mpsc::Sender<LispTask> {
     LISP_TASK_TX.get_or_init(|| {
         let (tx, rx) = std::sync::mpsc::channel::<LispTask>();
@@ -411,75 +519,11 @@ fn get_task_tx() -> &'static std::sync::mpsc::Sender<LispTask> {
                                 );
                             }
 
-                            let mut buf = LISP_OUTPUT_BUFFER.lock().unwrap();
-                            let buffered = std::mem::take(&mut *buf);
-
-                            let res = match eval_res {
-                                Ok(val) => {
-                                    let combined = if val == Value::Nil {
-                                        if buffered.is_empty() {
-                                            None
-                                        } else {
-                                            Some(buffered)
-                                        }
-                                    } else {
-                                        let val_str = format!("{}", val);
-                                        if buffered.is_empty() {
-                                            Some(val_str)
-                                        } else {
-                                            Some(format!("{}{}", buffered, val_str))
-                                        }
-                                    };
-                                    Ok(combined)
-                                }
-                                Err(e) => {
-                                    if !buffered.is_empty() {
-                                        let _ = with_host(|h| h.push_output(&buffered));
-                                    }
-                                    Err(format_and_store_eval_error(&e))
-                                }
+                            let buffered = {
+                                let mut buf = LISP_OUTPUT_BUFFER.lock().unwrap();
+                                std::mem::take(&mut *buf)
                             };
-
-                            global_bridge.lock().unwrap().reset_stream();
-
-                            if let Some(active) = active_interactive() {
-                                match res {
-                                    Ok(Some(ref val_str)) => {
-                                        active.finish();
-                                        let msg = val_str.clone();
-                                        if let Some(s) = crate::context::get_global_sender() {
-                                            std::thread::spawn(move || {
-                                                let _ = s.request(ocs_plugin_api::ipc::protocol::PluginRequest::PushOutput(msg));
-                                            });
-                                        }
-                                    }
-                                    Ok(None) => {
-                                        active.finish();
-                                    }
-                                    Err(ref err) => {
-                                        if crate::ide::server::has_active_clients() {
-                                            crate::ide::server::ide_log(
-                                                &format!("\n[AutoLISP Error] {err}\n"),
-                                                true,
-                                            );
-                                        }
-                                        let cmdline = get_last_lisp_cmdline_error().unwrap_or_else(|| {
-                                            err.lines().next().unwrap_or(err.as_str()).to_string()
-                                        });
-                                        let err_msg = format_cmdline_with_prefix("AutoLISP Error", &cmdline);
-                                        active.fail(&err_msg);
-                                        if let Some(s) = crate::context::get_global_sender() {
-                                            std::thread::spawn(move || {
-                                                let _ = s.request(ocs_plugin_api::ipc::protocol::PluginRequest::PushError(err_msg));
-                                            });
-                                        }
-                                    }
-                                }
-                                set_active_interactive(None);
-                                flush_deferred_setvars(&global_bridge);
-                            } else {
-                                let _ = resp.send(res);
-                            }
+                            finish_interactive_or_eval(eval_res, buffered, Some(resp), None, &global_bridge);
                         }
                         LispTask::EvalUnspanned { code, resp, worker_tx } => {
                             DEBUG_PAUSED_DURING_TASK.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -497,37 +541,11 @@ fn get_task_tx() -> &'static std::sync::mpsc::Sender<LispTask> {
                                 );
                             }
 
-                            let mut buf = LISP_OUTPUT_BUFFER.lock().unwrap();
-                            let buffered = std::mem::take(&mut *buf);
-
-                            let res = match eval_res {
-                                Ok(val) => {
-                                    let combined = if val == Value::Nil {
-                                        if buffered.is_empty() {
-                                            None
-                                        } else {
-                                            Some(buffered)
-                                        }
-                                    } else {
-                                        let val_str = format!("{}", val);
-                                        if buffered.is_empty() {
-                                            Some(val_str)
-                                        } else {
-                                            Some(format!("{}{}", buffered, val_str))
-                                        }
-                                    };
-                                    Ok(combined)
-                                }
-                                Err(e) => {
-                                    if !buffered.is_empty() {
-                                        let _ = with_host(|h| h.push_output(&buffered));
-                                    }
-                                    Err(format_and_store_eval_error(&e))
-                                }
+                            let buffered = {
+                                let mut buf = LISP_OUTPUT_BUFFER.lock().unwrap();
+                                std::mem::take(&mut *buf)
                             };
-
-                            global_bridge.lock().unwrap().reset_stream();
-                            let _ = resp.send(res);
+                            finish_interactive_or_eval(eval_res, buffered, Some(resp), None, &global_bridge);
                         }
                         LispTask::Load { path, resp, worker_tx } => {
                             global_bridge.lock().unwrap().reset_stream();
@@ -569,42 +587,11 @@ fn get_task_tx() -> &'static std::sync::mpsc::Sender<LispTask> {
                                 );
                             }
 
-                            let mut buf = LISP_OUTPUT_BUFFER.lock().unwrap();
-                            let buffered = std::mem::take(&mut *buf);
-                            if !buffered.is_empty() {
-                                let _ = with_host(|h| h.push_output(&buffered));
-                            }
-                            global_bridge.lock().unwrap().reset_stream();
-
-                            if let Some(active) = active_interactive() {
-                                if let Err(ref e) = eval_res {
-                                    let formatted = format_and_store_eval_error(e);
-                                    if crate::ide::server::has_active_clients() {
-                                        crate::ide::server::ide_log(
-                                            &format!("\n[AutoLISP Error] {formatted}\n"),
-                                            true,
-                                        );
-                                    }
-                                    let cmdline = get_last_lisp_cmdline_error().unwrap_or_else(|| {
-                                        formatted.lines().next().unwrap_or(formatted.as_str()).to_string()
-                                    });
-                                    let err_msg = format_cmdline_with_prefix("AutoLISP Error", &cmdline);
-                                    active.fail(&err_msg);
-                                    if let Some(s) = crate::context::get_global_sender() {
-                                        std::thread::spawn(move || {
-                                            let _ = s.request(ocs_plugin_api::ipc::protocol::PluginRequest::PushError(err_msg));
-                                        });
-                                    }
-                                } else {
-                                    active.finish();
-                                }
-                                set_active_interactive(None);
-                                flush_deferred_setvars(&global_bridge);
-                            } else {
-                                let _ = worker_tx.send(WorkerMsg::Finished(
-                                    eval_res.map(|_| ()).map_err(|e| format_and_store_eval_error(&e)),
-                                ));
-                            }
+                            let buffered = {
+                                let mut buf = LISP_OUTPUT_BUFFER.lock().unwrap();
+                                std::mem::take(&mut *buf)
+                            };
+                            finish_interactive_or_eval(eval_res, buffered, None, Some(&worker_tx), &global_bridge);
                             let _ = done.send(());
                         }
                     }
@@ -727,8 +714,11 @@ pub struct OpenCadRustBridge {
     pub current_color: Option<ocs_plugin_api::host::codec::types::Color>,
     pub sysvars: HashMap<String, DxfValue>,
     pub deferred_setvars: Vec<(String, DxfValue)>,
+    pub deferred_entmods: Vec<(Handle, EntityType, Option<Vec<(String, Vec<(i16, DxfValue)>)>>)>,
+    pub deferred_entdels: Vec<Handle>,
     pub registered_apps: std::collections::HashSet<String>,
     pub active_host_command: Option<String>,
+    pub init_dia_flag: bool,
     pub selection_sets: HashMap<u64, Vec<u64>>,
     pub next_ss_handle: u64,
     pub previous_selection: Vec<u64>,
@@ -1628,11 +1618,15 @@ pub fn apply_host_sysvar(host: &mut dyn HostApi, key: &str, val: &DxfValue) -> R
 }
 
 fn flush_deferred_setvars(bridge: &Arc<Mutex<OpenCadRustBridge>>) {
-    let pending: Vec<(String, DxfValue)> = {
+    let (pending_vars, pending_mods, pending_dels) = {
         let mut br = bridge.lock().unwrap();
-        std::mem::take(&mut br.deferred_setvars)
+        (
+            std::mem::take(&mut br.deferred_setvars),
+            std::mem::take(&mut br.deferred_entmods),
+            std::mem::take(&mut br.deferred_entdels),
+        )
     };
-    if pending.is_empty() {
+    if pending_vars.is_empty() && pending_mods.is_empty() && pending_dels.is_empty() {
         return;
     }
     if let Some(sender) = crate::context::get_global_sender() {
@@ -1640,8 +1634,24 @@ fn flush_deferred_setvars(bridge: &Arc<Mutex<OpenCadRustBridge>>) {
             // Wait briefly for the interactive CommandStep to complete on the host
             std::thread::sleep(Duration::from_millis(25));
             let mut host = crate::context::DebugHost::new(Some(sender));
-            for (k, v) in pending {
+            for (k, v) in pending_vars {
                 let _ = apply_host_sysvar(&mut host, &k, &v);
+            }
+            for (handle, entity, xdata_apps) in pending_mods {
+                if let Some(apps) = &xdata_apps {
+                    for (app_name, records) in apps {
+                        if records.is_empty() {
+                            let _ = host.remove_record(handle, app_name);
+                        } else {
+                            let rec = dxf_to_xdata_record(app_name, records);
+                            let _ = host.write_record(handle, rec);
+                        }
+                    }
+                }
+                let _ = host.update_entity(entity);
+            }
+            for handle in pending_dels {
+                let _ = host.remove_entity(handle);
             }
         });
     }
@@ -1655,8 +1665,11 @@ impl OpenCadRustBridge {
             current_color: None,
             sysvars: default_sysvars(),
             deferred_setvars: Vec::new(),
+            deferred_entmods: Vec::new(),
+            deferred_entdels: Vec::new(),
             registered_apps: std::collections::HashSet::new(),
             active_host_command: None,
+            init_dia_flag: false,
             selection_sets: HashMap::new(),
             next_ss_handle: 1,
             previous_selection: Vec::new(),
@@ -1666,6 +1679,8 @@ impl OpenCadRustBridge {
 
     pub fn reset_stream(&mut self) {
         self.stream_state = None;
+        self.active_host_command = None;
+        self.init_dia_flag = false;
     }
 
     pub fn current_layer(&self) -> String {
@@ -1691,7 +1706,7 @@ impl OpenCadRustBridge {
                 continue;
             }
 
-            let upper_verb = tok.trim_start_matches("_.").trim_start_matches('_').to_uppercase();
+            let upper_verb = tok.trim_start_matches(|c| c == '_' || c == '.').to_uppercase();
 
             // 1. Check for command verb starting a new stream
             match upper_verb.as_str() {
@@ -1739,47 +1754,9 @@ impl OpenCadRustBridge {
                     idx += 1;
                     continue;
                 }
-                "LAYER" => {
-                    let mut i = idx + 1;
-                    while i < tokens.len() {
-                        let sub = tokens[i].trim().trim_start_matches('_').to_uppercase();
-                        if sub == "M" || sub == "MAKE" || sub == "S" || sub == "SET" {
-                            if i + 1 < tokens.len() {
-                                let lay_name = tokens[i + 1].trim();
-                                if !lay_name.is_empty() {
-                                    self.sysvars.insert("CLAYER".into(), DxfValue::Str(lay_name.to_string()));
-                                    let lay_str = lay_name.to_string();
-                                    let _ = with_host(|h| {
-                                        if !h.document().layers.contains(&lay_str) {
-                                            let _ = h.add_layer(LayerConfig {
-                                                name: lay_str.clone(),
-                                                ..Default::default()
-                                            });
-                                        }
-                                    });
-                                }
-                                i += 2;
-                                continue;
-                            }
-                        } else if sub == "C" || sub == "COLOR" {
-                            if i + 2 < tokens.len() {
-                                let col_val = tokens[i + 1].trim().parse::<i16>().unwrap_or(7);
-                                let lay_name = tokens[i + 2].trim();
-                                let _ = with_host(|h| {
-                                    let _ = h.modify_layer(LayerConfig {
-                                        name: lay_name.to_string(),
-                                        color: Some(ocs_plugin_api::host::codec::types::Color::Index(col_val.clamp(0, 255) as u8)),
-                                        ..Default::default()
-                                    });
-                                });
-                                i += 3;
-                                continue;
-                            }
-                        }
-                        i += 1;
-                    }
+                "LAYER" | "-LAYER" => {
+                    self.update_layer_sysvar_from_tokens(tokens, idx + 1);
                     self.stream_state = None;
-                    handled_anything = true;
                     idx = tokens.len();
                     continue;
                 }
@@ -2025,6 +2002,489 @@ pub fn parse_ssget_mode(mode: &str) -> ParsedSsgetMode {
     parsed
 }
 
+fn entity_to_dxf_with_xdata(
+    ent: &EntityType,
+    h: Handle,
+    app_list: Option<&[String]>,
+    host_opt: Option<&dyn HostApi>,
+) -> Vec<(i16, DxfValue)> {
+    let mut dxf = entity_to_dxf(ent);
+    if let Some(apps) = app_list {
+        let match_all = apps.iter().any(|a| a == "*");
+        let mut xdata_apps = Vec::new();
+        if match_all {
+            for rec in ent.common().extended_data.records() {
+                xdata_apps.push((rec.application_name.clone(), xdata_record_to_dxf(rec)));
+            }
+        } else {
+            for app_name in apps {
+                if let Some(rec) = host_opt.and_then(|host| host.read_record(h, app_name)) {
+                    xdata_apps.push((app_name.clone(), xdata_record_to_dxf(rec)));
+                } else if let Some(rec) = ent.common().extended_data.get_record(app_name) {
+                    xdata_apps.push((app_name.clone(), xdata_record_to_dxf(rec)));
+                }
+            }
+        }
+        if !xdata_apps.is_empty() {
+            dxf.push((-3, DxfValue::XData(xdata_apps)));
+        }
+    }
+    dxf
+}
+
+fn apply_elist_to_entity(
+    ent: &mut EntityType,
+    elist: &[(i16, DxfValue)],
+    xdata_apps: Option<&[(String, Vec<(i16, DxfValue)>)]>,
+) {
+    if let Some(apps) = xdata_apps {
+        for (app_name, records) in apps {
+            if records.is_empty() {
+                ent.common_mut().extended_data.remove_record(app_name);
+            } else {
+                let rec = dxf_to_xdata_record(app_name, records);
+                ent.common_mut().extended_data.upsert_record(rec);
+            }
+        }
+    }
+
+    for (code, val) in elist {
+        match *code {
+            8 => {
+                if let DxfValue::Str(layer) = val {
+                    ent.common_mut().layer = layer.clone();
+                }
+            }
+            62 => {
+                if let Some(color_idx) = dxf_to_i64(val) {
+                    ent.common_mut().color = if color_idx == 256 {
+                        ocs_plugin_api::host::codec::types::Color::ByLayer
+                    } else if color_idx == 0 {
+                        ocs_plugin_api::host::codec::types::Color::ByBlock
+                    } else {
+                        ocs_plugin_api::host::codec::types::Color::from_index(
+                            color_idx.abs() as i16,
+                        )
+                    };
+                }
+            }
+            _ => {}
+        }
+    }
+
+    match ent {
+        EntityType::Line(line) => {
+            for (code, val) in elist {
+                match *code {
+                    10 => {
+                        if let DxfValue::Point(pt) = val {
+                            line.start = Vector3::new(pt[0], pt[1], pt[2]);
+                        }
+                    }
+                    11 => {
+                        if let DxfValue::Point(pt) = val {
+                            line.end = Vector3::new(pt[0], pt[1], pt[2]);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        EntityType::Circle(circle) => {
+            for (code, val) in elist {
+                match *code {
+                    10 => {
+                        if let DxfValue::Point(pt) = val {
+                            circle.center = Vector3::new(pt[0], pt[1], pt[2]);
+                        }
+                    }
+                    40 => {
+                        if let Some(r) = dxf_to_f64(val) {
+                            circle.radius = r;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        EntityType::Arc(arc) => {
+            for (code, val) in elist {
+                match *code {
+                    10 => {
+                        if let DxfValue::Point(pt) = val {
+                            arc.center = Vector3::new(pt[0], pt[1], pt[2]);
+                        }
+                    }
+                    40 => {
+                        if let Some(r) = dxf_to_f64(val) {
+                            arc.radius = r;
+                        }
+                    }
+                    50 => {
+                        if let Some(r) = dxf_to_f64(val) {
+                            arc.start_angle = r.to_radians();
+                        }
+                    }
+                    51 => {
+                        if let Some(r) = dxf_to_f64(val) {
+                            arc.end_angle = r.to_radians();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        EntityType::Point(pt_ent) => {
+            for (code, val) in elist {
+                if *code == 10 {
+                    if let DxfValue::Point(pt) = val {
+                        pt_ent.location = Vector3::new(pt[0], pt[1], pt[2]);
+                    }
+                }
+            }
+        }
+        EntityType::Text(txt) => {
+            for (code, val) in elist {
+                match *code {
+                    1 => {
+                        if let DxfValue::Str(s) = val {
+                            txt.value = s.clone();
+                        }
+                    }
+                    10 => {
+                        if let DxfValue::Point(pt) = val {
+                            txt.insertion_point = Vector3::new(pt[0], pt[1], pt[2]);
+                        }
+                    }
+                    40 => {
+                        if let Some(r) = dxf_to_f64(val) {
+                            txt.height = r;
+                        }
+                    }
+                    50 => {
+                        if let Some(r) = dxf_to_f64(val) {
+                            txt.rotation = r.to_radians();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        EntityType::MText(mt) => {
+            for (code, val) in elist {
+                match *code {
+                    1 => {
+                        if let DxfValue::Str(s) = val {
+                            mt.value = s.clone();
+                        }
+                    }
+                    10 => {
+                        if let DxfValue::Point(pt) = val {
+                            mt.insertion_point = Vector3::new(pt[0], pt[1], pt[2]);
+                        }
+                    }
+                    40 => {
+                        if let Some(r) = dxf_to_f64(val) {
+                            mt.height = r;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        EntityType::LwPolyline(poly) => {
+            let mut new_verts = Vec::new();
+            for (code, val) in elist {
+                match *code {
+                    70 => {
+                        if let Some(flags) = dxf_to_i64(val) {
+                            poly.is_closed = (flags & 1) != 0;
+                        }
+                    }
+                    38 => {
+                        if let Some(elev) = dxf_to_f64(val) {
+                            poly.elevation = elev;
+                        }
+                    }
+                    10 => {
+                        if let DxfValue::Point(pt) = val {
+                            new_verts.push(LwVertex::new(Vector2::new(pt[0], pt[1])));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if !new_verts.is_empty() {
+                poly.vertices = new_verts;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_command_terminator_token(tok: &str) -> bool {
+    let trimmed = tok.trim();
+    trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("ENTER")
+        || trimmed.eq_ignore_ascii_case("RETURN")
+        || trimmed.eq_ignore_ascii_case("ESC")
+        || trimmed.eq_ignore_ascii_case("ESCAPE")
+        || trimmed.eq_ignore_ascii_case("CANCEL")
+}
+
+fn is_cancel_token(tok: &str) -> bool {
+    let trimmed = tok.trim();
+    trimmed.eq_ignore_ascii_case("ESC")
+        || trimmed.eq_ignore_ascii_case("ESCAPE")
+        || trimmed.eq_ignore_ascii_case("CANCEL")
+}
+
+fn is_pause_token(tok: &str) -> bool {
+    let trimmed = tok.trim();
+    trimmed == "\\" || trimmed.eq_ignore_ascii_case("PAUSE")
+}
+
+/// Maps dual-mode CAD commands (which show a dialog/palette interactively) and
+/// their standard aliases to their command-line `-` variants when invoked via
+/// AutoLISP `(command ...)` without `(initdia 1)`.
+fn map_dual_mode_command_to_cmdline(upper_bare: &str, second_upper: &str) -> Option<&'static str> {
+    match upper_bare {
+        "LAYER" | "LAYERS" | "LA" => Some("-LAYER"),
+        "LAYERSTATE" | "LAS" | "LMAN" => Some("-LAYERSTATE"),
+        "LAYTRANS" => Some("-LAYTRANS"),
+        "LAYERFILTER" => Some("-LAYERFILTER"),
+        "INSERT" | "I" => Some("-INSERT"),
+        "BLOCK" | "BMAKE" | "B" => Some("-BLOCK"),
+        "WBLOCK" | "WB" | "W" => Some("-WBLOCK"),
+        "BEDIT" | "BE" => Some("-BEDIT"),
+        "ATTDEF" | "ATT" => Some("-ATTDEF"),
+        "ATTEDIT" | "EATTEDIT" | "ATE" | "ATTE" => Some("-ATTEDIT"),
+        "REFEDIT" => Some("-REFEDIT"),
+        "XREF" | "XR" => Some("-XREF"),
+        "XBIND" | "XB" => Some("-XBIND"),
+        "ATTACH" | "XATTACH" | "XA" => Some("-ATTACH"),
+        "STYLE" | "DDSTYLE" | "ST" => {
+            if matches!(second_upper, "SET" | "FONT" | "WIDTH" | "OBLIQUE" | "DIALOG" | "UI") {
+                None
+            } else {
+                Some("-STYLE")
+            }
+        }
+        "DIMSTYLE" | "DDIM" | "D" => Some("-DIMSTYLE"),
+        "LINETYPE" | "DDLTYPE" | "LT" => Some("-LINETYPE"),
+        "TABLE" | "TB" => {
+            if matches!(
+                second_upper,
+                "CELL"
+                    | "INSERTROW"
+                    | "DELETEROW"
+                    | "INSERTCOLUMN"
+                    | "INSERTCOL"
+                    | "DELETECOLUMN"
+                    | "DELETECOL"
+                    | "MERGE"
+                    | "UNMERGE"
+                    | "ROWHEIGHT"
+                    | "COLUMNWIDTH"
+                    | "COLWIDTH"
+                    | "LOCK"
+                    | "BLOCK"
+                    | "FORMULA"
+                    | "FIELD"
+            ) {
+                None
+            } else {
+                Some("-TABLE")
+            }
+        }
+        "TABLEDIT" => Some("-TABLEDIT"),
+        "PURGE" | "PU" => Some("-PURGE"),
+        "PLOT" | "PRINT" => Some("-PLOT"),
+        "PAGESETUP" => Some("-PAGESETUP"),
+        "PSETUPIN" => Some("-PSETUPIN"),
+        "PUBLISH" => Some("-PUBLISH"),
+        "PREVIEW" => Some("-PREVIEW"),
+        "LAYOUT" => Some("-LAYOUT"),
+        "RENAME" | "REN" => Some("-RENAME"),
+        "VIEW" | "V" => Some("-VIEW"),
+        "VPORTS" => Some("-VPORTS"),
+        "VPSCALE" => Some("-VPSCALE"),
+        "VPLOCK" => Some("-VPLOCK"),
+        "VPMAX" => Some("-VPMAX"),
+        "VPMIN" => Some("-VPMIN"),
+        "OVERKILL" => Some("-OVERKILL"),
+        "SETBYLAYER" => Some("-SETBYLAYER"),
+        "HYPERLINK" => Some("-HYPERLINK"),
+        "FIELD" => Some("-FIELD"),
+        "TEXTMASK" => Some("-TEXTMASK"),
+        "DIMINSPECT" => Some("-DIMINSPECT"),
+        "DATAEXTRACTION" | "DX" => Some("-DATAEXTRACTION"),
+        "PARAMETERS" | "PAR" => Some("-PARAMETERS"),
+        "SCALELISTEDIT" => Some("-SCALELISTEDIT"),
+        "OBJECTSCALE" => Some("-OBJECTSCALE"),
+        "PDFIMPORT" => Some("-PDFIMPORT"),
+        "PDFATTACH" => Some("-PDFATTACH"),
+        "DWFATTACH" => Some("-DWFATTACH"),
+        "DGNATTACH" => Some("-DGNATTACH"),
+        "DGNIMPORT" => Some("-DGNIMPORT"),
+        "POINTCLOUDATTACH" => Some("-POINTCLOUDATTACH"),
+        "PCEXTRACTSECTION" => Some("-PCEXTRACTSECTION"),
+        "IMAGEADJUST" | "IAD" => Some("-IMAGEADJUST"),
+        "TOOLBAR" => Some("-TOOLBAR"),
+        _ => None,
+    }
+}
+
+fn is_multi_step_cad_command(upper_cmd: &str) -> bool {
+    upper_cmd.starts_with('-')
+        || matches!(
+            upper_cmd,
+            "LINE" | "PLINE" | "CIRCLE" | "ARC" | "RECTANG" | "RECTANGLE" | "POLYGON"
+                | "SPLINE" | "ELLIPSE" | "MOVE" | "COPY" | "ROTATE" | "SCALE"
+                | "MIRROR" | "ERASE" | "OFFSET" | "TRIM" | "EXTEND" | "FILLET"
+                | "CHAMFER" | "ARRAY" | "STRETCH" | "BREAK" | "JOIN" | "EXPLODE"
+                | "HATCH" | "TEXT" | "MTEXT" | "DIMLINEAR" | "DIMALIGNED" | "DIMRADIUS"
+                | "DIMDIAMETER" | "DIMANGULAR" | "LEADER" | "QLEADER"
+        )
+}
+
+fn dispatch_command_tokens_to_host(norm_args: &[String], mut send: impl FnMut(&str)) {
+    if norm_args.is_empty() {
+        return;
+    }
+    let verb = norm_args[0].trim();
+    let second_upper = norm_args
+        .get(1)
+        .map(|s| s.trim().trim_start_matches('_').to_ascii_uppercase())
+        .unwrap_or_default();
+
+    if verb == "-DIMSTYLE" && norm_args.len() > 1 && !norm_args[1].trim_start().starts_with('[') {
+        send("-DIMSTYLE");
+        send(&norm_args[1..].join(" "));
+    } else if verb == "-LINETYPE"
+        && norm_args.len() > 1
+        && !(norm_args.len() == 4
+            && matches!(second_upper.as_str(), "C" | "CREATE")
+            && !norm_args[2..].iter().any(|a| a.eq_ignore_ascii_case("ENTER")))
+    {
+        send("-LINETYPE");
+        send(&norm_args[1..].join(" "));
+    } else if verb == "-ATTEDIT"
+        && norm_args.len() > 1
+        && matches!(second_upper.as_str(), "Y" | "YES" | "N" | "NO" | "ENTER")
+    {
+        send("-ATTEDIT");
+        send(&norm_args[1..].join(" "));
+    } else if verb == "-WBLOCK" && norm_args.len() > 1 {
+        send(&format!("_-WBLOCKFILE {}", norm_args[1]));
+        if norm_args.len() > 2 {
+            send(&norm_args[2..].join(" "));
+        }
+    } else {
+        send(&norm_args.join(" "));
+    }
+}
+
+impl OpenCadRustBridge {
+    fn update_layer_sysvar_from_tokens<S: AsRef<str>>(&mut self, tokens: &[S], start_idx: usize) {
+        let mut i = start_idx;
+        while i < tokens.len() {
+            let sub = tokens[i].as_ref().trim().trim_start_matches('_').to_ascii_uppercase();
+            if matches!(sub.as_str(), "M" | "MAKE" | "S" | "SET") {
+                if i + 1 < tokens.len() {
+                    let lay_name = tokens[i + 1].as_ref().trim();
+                    if !lay_name.is_empty() && !is_command_terminator_token(lay_name) {
+                        self.sysvars
+                            .insert("CLAYER".into(), DxfValue::Str(lay_name.to_string()));
+                    }
+                    i += 2;
+                    continue;
+                }
+            } else if matches!(
+                sub.as_str(),
+                "C" | "COLOR" | "L" | "LTYPE" | "LT" | "LW" | "LWEIGHT" | "T" | "TR" | "TRANSPARENCY"
+            ) {
+                if i + 2 < tokens.len() {
+                    i += 3;
+                    continue;
+                }
+            } else if matches!(
+                sub.as_str(),
+                "N" | "NEW" | "ON" | "OFF" | "F" | "FREEZE" | "TH" | "THAW" | "LO" | "LOCK" | "U" | "UNLOCK"
+            ) {
+                if i + 1 < tokens.len() {
+                    i += 2;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+
+    /// Normalize AutoLISP `(command ...)` tokens for host dispatch, resolving
+    /// dual-mode commands to their `-` command-line equivalents unless `(initdia 1)`
+    /// was called, and tracking multi-call prompt continuation state.
+    fn normalize_and_track_command(&mut self, args: &[String]) -> Option<(Vec<String>, Option<String>)> {
+        if args.is_empty() || (args.len() == 1 && args[0].is_empty()) {
+            self.init_dia_flag = false;
+            if self.active_host_command.take().is_some() {
+                return Some((vec!["ESC".to_string()], None));
+            }
+            return None;
+        }
+
+        if is_cancel_token(&args[0]) {
+            self.active_host_command = None;
+            self.init_dia_flag = false;
+            return Some((args.to_vec(), None));
+        }
+
+        let prev_active = self.active_host_command.clone();
+        let mut norm_args = args.to_vec();
+
+        if let Some(ref active_cmd) = prev_active {
+            let has_terminator = norm_args.iter().any(|t| is_command_terminator_token(t));
+            let ends_with_pause = norm_args.last().is_some_and(|t| is_pause_token(t));
+            if has_terminator || (active_cmd != "-LAYER" && !ends_with_pause) {
+                self.active_host_command = None;
+            }
+        } else {
+            let use_dialog = std::mem::replace(&mut self.init_dia_flag, false);
+            let bare = norm_args[0].trim().trim_start_matches(|c| c == '_' || c == '.');
+            let upper = bare.to_ascii_uppercase();
+            let second_upper = norm_args
+                .get(1)
+                .map(|s| s.trim().trim_start_matches('_').to_ascii_uppercase())
+                .unwrap_or_default();
+
+            if upper.starts_with('-') {
+                norm_args[0] = upper;
+            } else if !use_dialog {
+                if let Some(dash_cmd) = map_dual_mode_command_to_cmdline(&upper, &second_upper) {
+                    norm_args[0] = dash_cmd.to_string();
+                }
+            }
+
+            let verb = norm_args[0]
+                .trim()
+                .trim_start_matches(|c| c == '_' || c == '.')
+                .to_ascii_uppercase();
+            let has_terminator = norm_args[1..].iter().any(|t| is_command_terminator_token(t));
+            let ends_with_pause = norm_args.last().is_some_and(|t| is_pause_token(t));
+
+            if verb == "-LAYER" {
+                if !has_terminator {
+                    self.active_host_command = Some("-LAYER".to_string());
+                }
+            } else if (norm_args.len() == 1 && is_multi_step_cad_command(&verb)) || ends_with_pause {
+                self.active_host_command = Some(verb);
+            }
+        }
+
+        Some((norm_args, prev_active))
+    }
+}
+
 impl CadBridge for OpenCadRustBridge {
     fn execute_command(&mut self, cmd: &str) -> Result<(), String> {
         let tokens: Vec<String> = cmd.split_whitespace().map(|s| s.to_string()).collect();
@@ -2032,36 +2492,42 @@ impl CadBridge for OpenCadRustBridge {
     }
 
     fn execute_command_args(&mut self, args: &[String]) -> Result<(), String> {
-        self.executed_commands.push(args.join(" "));
-        if args.is_empty() {
+        let Some((norm_args, prev_active)) = self.normalize_and_track_command(args) else {
+            self.executed_commands.push(args.join(" "));
             return Ok(());
-        }
-
-        // When an interactive session is active, check if the streaming state machine
-        // can handle simulated primitive stream tokens (e.g. COLOR, LINE, CIRCLE, POINT).
-        let cmd_line = if args.len() == 1 {
-            args[0].clone()
-        } else {
-            args.join(" ")
         };
 
+        let cmd_line = norm_args.join(" ");
+        self.executed_commands.push(cmd_line.clone());
+
+        let is_layer_cmd = norm_args[0]
+            .trim()
+            .trim_start_matches(|c| c == '_' || c == '.')
+            .eq_ignore_ascii_case("-LAYER")
+            || norm_args[0]
+                .trim()
+                .trim_start_matches(|c| c == '_' || c == '.')
+                .eq_ignore_ascii_case("LAYER");
+        if is_layer_cmd {
+            self.update_layer_sysvar_from_tokens(&norm_args, 1);
+        } else if prev_active.as_deref() == Some("-LAYER") {
+            self.update_layer_sysvar_from_tokens(&norm_args, 0);
+        }
+
         if let Some(bridge) = active_interactive() {
-            let token_strs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            let token_strs: Vec<&str> = norm_args.iter().map(|s| s.as_str()).collect();
             if self.process_stream_tokens(&token_strs) {
                 return Ok(());
             }
-            // If not handled by stream primitive state machine, queue onto the
-            // active interactive bridge to be dispatched upon completion.
-            bridge.queue_command(cmd_line);
+            dispatch_command_tokens_to_host(&norm_args, |cmd| bridge.queue_command(cmd.to_string()));
             return Ok(());
         }
 
         let res = with_host(|host| {
-            if args.len() > 1 {
-                let first_norm = args[0]
+            if norm_args.len() > 1 {
+                let first_norm = norm_args[0]
                     .trim()
-                    .trim_start_matches('_')
-                    .trim_start_matches('.')
+                    .trim_start_matches(|c| c == '_' || c == '.')
                     .to_uppercase();
                 if matches!(
                     first_norm.as_str(),
@@ -2070,7 +2536,9 @@ impl CadBridge for OpenCadRustBridge {
                     let _ = host.set_selection(&[]);
                 }
             }
-            host.execute_command(&cmd_line);
+            dispatch_command_tokens_to_host(&norm_args, |cmd| {
+                let _ = host.execute_command(cmd);
+            });
             Ok(())
         });
 
@@ -2104,7 +2572,7 @@ impl CadBridge for OpenCadRustBridge {
         let mut result = None;
 
         if let Some(bridge) = active_interactive() {
-            result = bridge.query_entity(handle, |ent| entity_to_dxf(ent));
+            result = bridge.query_entity(handle, |ent| entity_to_dxf_with_xdata(ent, h, app_list, None));
             if let Some(dxf) = result {
                 return Ok(dxf);
             }
@@ -2114,28 +2582,7 @@ impl CadBridge for OpenCadRustBridge {
         if result.is_none() {
             let _ = with_host(|host| {
                 if let Some(ent) = host.document().get_entity(h) {
-                    let mut dxf = entity_to_dxf(ent);
-                    if let Some(apps) = app_list {
-                        let match_all = apps.iter().any(|a| a == "*");
-                        let mut xdata_apps = Vec::new();
-                        if match_all {
-                            for rec in ent.common().extended_data.records() {
-                                xdata_apps.push((rec.application_name.clone(), xdata_record_to_dxf(rec)));
-                            }
-                        } else {
-                            for app_name in apps {
-                                if let Some(rec) = host.read_record(h, app_name) {
-                                    xdata_apps.push((app_name.clone(), xdata_record_to_dxf(rec)));
-                                } else if let Some(rec) = ent.common().extended_data.get_record(app_name) {
-                                    xdata_apps.push((app_name.clone(), xdata_record_to_dxf(rec)));
-                                }
-                            }
-                        }
-                        if !xdata_apps.is_empty() {
-                            dxf.push((-3, DxfValue::XData(xdata_apps)));
-                        }
-                    }
-                    result = Some(dxf);
+                    result = Some(entity_to_dxf_with_xdata(ent, h, app_list, Some(host)));
                 }
             });
         }
@@ -2164,6 +2611,53 @@ impl CadBridge for OpenCadRustBridge {
             }
         });
 
+        if let Some(active) = active_interactive() {
+            let mut is_pending = false;
+            let mut target_ent = if let Ok(list) = active.coordinator.pending_entities.lock() {
+                list.iter()
+                    .find(|e| e.common().handle == handle)
+                    .cloned()
+                    .map(|e| {
+                        is_pending = true;
+                        e
+                    })
+            } else {
+                None
+            };
+            if target_ent.is_none() {
+                if let Ok(guard) = active.doc_snapshot.lock() {
+                    if let Some(ref doc) = *guard {
+                        target_ent = doc.get_entity(handle).cloned();
+                    }
+                }
+            }
+            if let Some(mut ent) = target_ent {
+                apply_elist_to_entity(&mut ent, elist, xdata_apps.as_deref());
+                if is_pending {
+                    if let Ok(mut list) = active.coordinator.pending_entities.lock() {
+                        if let Some(slot) = list.iter_mut().find(|e| e.common().handle == handle) {
+                            *slot = ent.clone();
+                        }
+                    }
+                }
+                if let Ok(mut guard) = active.doc_snapshot.lock() {
+                    if let Some(ref mut doc) = *guard {
+                        if let Some(slot) = doc.get_entity_mut(handle) {
+                            *slot = ent.clone();
+                        }
+                    }
+                }
+                if !is_pending {
+                    if let Some(existing) = self.deferred_entmods.iter_mut().find(|(h, _, _)| *h == handle) {
+                        *existing = (handle, ent, xdata_apps);
+                    } else {
+                        self.deferred_entmods.push((handle, ent, xdata_apps));
+                    }
+                }
+            }
+            return Ok(());
+        }
+
         with_host(|h| {
             if let Some(apps) = &xdata_apps {
                 for (app_name, records) in apps {
@@ -2178,179 +2672,7 @@ impl CadBridge for OpenCadRustBridge {
 
             let existing = h.document().get_entity(handle).cloned();
             if let Some(mut ent) = existing {
-                for (code, val) in elist {
-                    match *code {
-                        8 => {
-                            if let DxfValue::Str(layer) = val {
-                                ent.common_mut().layer = layer.clone();
-                            }
-                        }
-                        62 => {
-                            if let Some(color_idx) = dxf_to_i64(val) {
-                                ent.common_mut().color = if color_idx == 256 {
-                                    ocs_plugin_api::host::codec::types::Color::ByLayer
-                                } else if color_idx == 0 {
-                                    ocs_plugin_api::host::codec::types::Color::ByBlock
-                                } else {
-                                    ocs_plugin_api::host::codec::types::Color::from_index(
-                                        color_idx.abs() as i16,
-                                    )
-                                };
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-
-                match &mut ent {
-                    EntityType::Line(line) => {
-                        for (code, val) in elist {
-                            match *code {
-                                10 => {
-                                    if let DxfValue::Point(pt) = val {
-                                        line.start = Vector3::new(pt[0], pt[1], pt[2]);
-                                    }
-                                }
-                                11 => {
-                                    if let DxfValue::Point(pt) = val {
-                                        line.end = Vector3::new(pt[0], pt[1], pt[2]);
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    EntityType::Circle(circle) => {
-                        for (code, val) in elist {
-                            match *code {
-                                10 => {
-                                    if let DxfValue::Point(pt) = val {
-                                        circle.center = Vector3::new(pt[0], pt[1], pt[2]);
-                                    }
-                                }
-                                40 => {
-                                    if let Some(r) = dxf_to_f64(val) {
-                                        circle.radius = r;
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    EntityType::Arc(arc) => {
-                        for (code, val) in elist {
-                            match *code {
-                                10 => {
-                                    if let DxfValue::Point(pt) = val {
-                                        arc.center = Vector3::new(pt[0], pt[1], pt[2]);
-                                    }
-                                }
-                                40 => {
-                                    if let Some(r) = dxf_to_f64(val) {
-                                        arc.radius = r;
-                                    }
-                                }
-                                50 => {
-                                    if let Some(r) = dxf_to_f64(val) {
-                                        arc.start_angle = r.to_radians();
-                                    }
-                                }
-                                51 => {
-                                    if let Some(r) = dxf_to_f64(val) {
-                                        arc.end_angle = r.to_radians();
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    EntityType::Point(pt_ent) => {
-                        for (code, val) in elist {
-                            if *code == 10 {
-                                if let DxfValue::Point(pt) = val {
-                                    pt_ent.location = Vector3::new(pt[0], pt[1], pt[2]);
-                                }
-                            }
-                        }
-                    }
-                    EntityType::Text(txt) => {
-                        for (code, val) in elist {
-                            match *code {
-                                1 => {
-                                    if let DxfValue::Str(s) = val {
-                                        txt.value = s.clone();
-                                    }
-                                }
-                                10 => {
-                                    if let DxfValue::Point(pt) = val {
-                                        txt.insertion_point = Vector3::new(pt[0], pt[1], pt[2]);
-                                    }
-                                }
-                                40 => {
-                                    if let Some(r) = dxf_to_f64(val) {
-                                        txt.height = r;
-                                    }
-                                }
-                                50 => {
-                                    if let Some(r) = dxf_to_f64(val) {
-                                        txt.rotation = r.to_radians();
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    EntityType::MText(mt) => {
-                        for (code, val) in elist {
-                            match *code {
-                                1 => {
-                                    if let DxfValue::Str(s) = val {
-                                        mt.value = s.clone();
-                                    }
-                                }
-                                10 => {
-                                    if let DxfValue::Point(pt) = val {
-                                        mt.insertion_point = Vector3::new(pt[0], pt[1], pt[2]);
-                                    }
-                                }
-                                40 => {
-                                    if let Some(r) = dxf_to_f64(val) {
-                                        mt.height = r;
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    EntityType::LwPolyline(poly) => {
-                        let mut new_verts = Vec::new();
-                        for (code, val) in elist {
-                            match *code {
-                                70 => {
-                                    if let Some(flags) = dxf_to_i64(val) {
-                                        poly.is_closed = (flags & 1) != 0;
-                                    }
-                                }
-                                38 => {
-                                    if let Some(elev) = dxf_to_f64(val) {
-                                        poly.elevation = elev;
-                                    }
-                                }
-                                10 => {
-                                    if let DxfValue::Point(pt) = val {
-                                        new_verts.push(LwVertex::new(Vector2::new(pt[0], pt[1])));
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        if !new_verts.is_empty() {
-                            poly.vertices = new_verts;
-                        }
-                    }
-                    _ => {}
-                }
-
+                apply_elist_to_entity(&mut ent, elist, xdata_apps.as_deref());
                 h.update_entity(ent);
                 h.set_dirty();
                 h.bump_geometry();
@@ -2406,10 +2728,29 @@ impl CadBridge for OpenCadRustBridge {
     }
 
     fn ent_del(&mut self, handle: u64) -> Result<(), String> {
-        with_host(|h| {
-            h.remove_entity(Handle::new(handle));
-            h.set_dirty();
-            h.bump_geometry();
+        let h = Handle::new(handle);
+        if let Some(active) = active_interactive() {
+            let mut removed_pending = false;
+            if let Ok(mut list) = active.coordinator.pending_entities.lock() {
+                let before = list.len();
+                list.retain(|e| e.common().handle != h);
+                removed_pending = list.len() != before;
+            }
+            if let Ok(mut guard) = active.doc_snapshot.lock() {
+                if let Some(ref mut doc) = *guard {
+                    doc.remove_entity(h);
+                }
+            }
+            self.deferred_entmods.retain(|(mh, _, _)| *mh != h);
+            if !removed_pending && !self.deferred_entdels.contains(&h) {
+                self.deferred_entdels.push(h);
+            }
+            return Ok(());
+        }
+        with_host(|host| {
+            host.remove_entity(h);
+            host.set_dirty();
+            host.bump_geometry();
         }).map_err(|e| e.to_string())
     }
 
@@ -2830,6 +3171,10 @@ impl CadBridge for OpenCadRustBridge {
 
     fn init_get(&mut self, _bits: i32, _keywords: &str) {}
 
+    fn init_dia(&mut self, use_dialog: bool) {
+        self.init_dia_flag = use_dialog;
+    }
+
     fn get_var(&self, name: &str) -> Result<DxfValue, String> {
         let key = name.trim().to_ascii_uppercase();
         if key.is_empty() {
@@ -3115,21 +3460,42 @@ impl CadBridge for OpenCadRustBridge {
     }
 
     fn ent_sel(&mut self, prompt: Option<&str>) -> Result<Option<(u64, [f64; 3])>, String> {
-        let p_str = prompt.unwrap_or("Select object: ");
-        let pt = match self.get_point(None, p_str)? {
-            Some(pt) => pt,
-            None => return Ok(None),
-        };
-        let ss = self.ss_get("C", Some(&[pt, pt]), None)?;
-        if let Some(ss_handle) = ss {
-            if self.ss_length(ss_handle) > 0 {
-                if let Some(ename) = self.ss_name(ss_handle, 0) {
-                    return Ok(Some((ename, pt)));
-                }
+        flush_lisp_output();
+        let p_str = prompt.filter(|s| !s.is_empty()).unwrap_or("Select object: ");
+        let bridge = if let Some(b) = active_interactive() {
+            Some(b)
+        } else {
+            let base_h = with_host(|h| h.document().next_handle()).unwrap_or(100);
+            let doc = with_host(|h| Some(h.document().clone())).unwrap_or(None);
+            let (b, cmd_box) = LispInteractiveBridge::new(
+                p_str.to_string(),
+                InteractionMode::EntityPick,
+                base_h,
+                doc,
+            );
+            let has_host = if let Some(tx) = crate::context::get_worker_tx() {
+                tx.send(WorkerMsg::InteractiveStarted(cmd_box)).is_ok()
+            } else {
+                false
+            };
+            if has_host {
+                set_active_interactive(Some(b.clone()));
+                Some(b)
+            } else {
+                None
             }
+        };
+
+        if let Some(b) = bridge {
+            let res = b.get_entity(Some(p_str));
+            if let Some((_, pt)) = res {
+                self.sysvars.insert("LASTPOINT".into(), DxfValue::Point(pt));
+            }
+            return Ok(res);
         }
+
         if let Some(h) = self.ent_last() {
-            Ok(Some((h, pt)))
+            Ok(Some((h, [0.0, 0.0, 0.0])))
         } else {
             Ok(None)
         }
@@ -5658,6 +6024,287 @@ mod tests {
         // Conclude with submit
         let step = cmd.on_dialog_response(ocs_plugin_api::dialog::DialogResponse::Submitted(current_vals));
         assert!(matches!(step, ocs_plugin_api::host::CommandStep::Done));
+    }
+
+    #[test]
+    fn test_entsel_interactive_object_pick_and_entget_entmod_move() {
+        let tab_id: u64 = 9010;
+        clean_tab_state(tab_id);
+
+        let code = r#"
+            (defun c:entsel_test_flow (/ sel ent elist new_elist)
+              (if (setq sel (entsel "\nSelect entity: "))
+                (progn
+                  (setq ent (car sel))
+                  (setq _test_pt (cadr sel))
+                  (setq _test_lastp (getvar "LASTPOINT"))
+                  (setq elist (entget ent))
+                  (setq new_elist (subst '(8 . "MODIFIED_LAYER") (assoc 8 elist) elist))
+                  (entmod new_elist)
+                  (setq _test_updated (cdr (assoc 8 (entget ent))))
+                  (command "_MOVE" sel "" "_NONE" _test_pt "_NONE" '(0.0 0.0 0.0))
+                )
+              )
+              (princ)
+            )
+            (defun c:entsel_del_test (/ sel)
+              (if (setq sel (entsel "\nDelete entity: "))
+                (progn
+                  (entdel (car sel))
+                  (setq _test_deleted (vl-catch-all-error-p (vl-catch-all-apply 'entget (list (car sel)))))
+                )
+              )
+              (princ)
+            )
+            (defun c:entsel_cancel_test ()
+              (setq _test_cancel_sel (entsel "\nPick or press Enter: "))
+              (if _test_cancel_sel
+                (princ "\nGOT_ENTITY")
+                (princ "\nCANCELLED_OK")
+              )
+              (princ)
+            )
+        "#;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (worker_tx, _) = std::sync::mpsc::channel();
+        let _ = get_task_tx().send(LispTask::WithTab {
+            tab_id,
+            task: Box::new(LispTask::Eval {
+                code: code.to_string(),
+                resp: tx,
+                worker_tx,
+            }),
+        });
+        assert!(rx.recv().unwrap().is_ok());
+
+        // 1. Test interactive object pick + LASTPOINT + entget + entmod + MOVE dispatch
+        let mut mock_host = crate::context::DebugHost::new(None);
+        let picked_handle = {
+            let line = Line::from_coords(10.0, 20.0, 0.0, 30.0, 40.0, 0.0);
+            mock_host.document_mut().add_entity(EntityType::Line(line)).unwrap()
+        };
+
+        let (worker_tx, worker_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let _ = get_task_tx().send(LispTask::WithTab {
+            tab_id,
+            task: Box::new(LispTask::ExecuteCommand {
+                lisp_call: "(c:entsel_test_flow)".to_string(),
+                worker_tx,
+                done: done_tx,
+            }),
+        });
+
+        let mut cmd = loop {
+            match worker_rx.recv().unwrap() {
+                WorkerMsg::HostCall(mut task) => task(&mut mock_host),
+                WorkerMsg::InteractiveStarted(c) => break c,
+                WorkerMsg::Finished(r) => panic!("Expected InteractiveStarted, got Finished({:?})", r),
+            }
+        };
+
+        assert!(cmd.needs_object_pick(), "entsel must set needs_object_pick() = true");
+        assert!(!cmd.is_selection_gathering(), "entsel should not use box selection gathering");
+        assert_eq!(cmd.prompt(), "\nSelect entity: ");
+
+        let step = cmd.on_object_pick(picked_handle, [15.5, 25.25, 0.0]);
+        done_rx.recv().unwrap();
+
+        match step {
+            ocs_plugin_api::host::CommandStep::Dispatch(dispatched) => {
+                assert!(dispatched.contains("_MOVE"), "Expected _MOVE dispatch, got: {dispatched}");
+                let hex_h = format!("{:X}", picked_handle.value());
+                assert!(
+                    dispatched.contains(&hex_h),
+                    "Expected hex handle {hex_h} in MOVE dispatch, got: {dispatched}"
+                );
+                assert!(
+                    dispatched.contains("15.5000,25.2500,0.0000"),
+                    "Expected pick point in MOVE dispatch, got: {dispatched}"
+                );
+            }
+            other => panic!("Expected CommandStep::Dispatch, got {:?}", other),
+        }
+
+        // Verify worker finished cleanly and updated internal state/vars as expected
+        let (tx_chk, rx_chk) = std::sync::mpsc::channel();
+        let (wtx_chk, _) = std::sync::mpsc::channel();
+        let _ = get_task_tx().send(LispTask::WithTab {
+            tab_id,
+            task: Box::new(LispTask::Eval {
+                code: "(list _test_updated _test_lastp (equal _test_pt _test_lastp))".to_string(),
+                resp: tx_chk,
+                worker_tx: wtx_chk,
+            }),
+        });
+        let chk = rx_chk.recv().unwrap().unwrap().unwrap();
+        assert!(
+            chk.contains("\"MODIFIED_LAYER\"") && chk.contains("15.5 25.25 0") && chk.contains("T"),
+            "Expected entmod layer update and LASTPOINT sync, got: {chk}"
+        );
+
+        // 2. Test interactive entdel removes entity from active snapshot
+        let (worker_tx_del, worker_rx_del) = std::sync::mpsc::channel();
+        let (done_tx_del, done_rx_del) = std::sync::mpsc::channel();
+        let _ = get_task_tx().send(LispTask::WithTab {
+            tab_id,
+            task: Box::new(LispTask::ExecuteCommand {
+                lisp_call: "(c:entsel_del_test)".to_string(),
+                worker_tx: worker_tx_del,
+                done: done_tx_del,
+            }),
+        });
+        let mut cmd_del = loop {
+            match worker_rx_del.recv().unwrap() {
+                WorkerMsg::HostCall(mut task) => task(&mut mock_host),
+                WorkerMsg::InteractiveStarted(c) => break c,
+                WorkerMsg::Finished(r) => panic!("Expected InteractiveStarted, got Finished({:?})", r),
+            }
+        };
+        assert!(cmd_del.needs_object_pick());
+        let step_del = cmd_del.on_object_pick(picked_handle, [10.0, 20.0, 0.0]);
+        done_rx_del.recv().unwrap();
+        assert!(matches!(step_del, ocs_plugin_api::host::CommandStep::Done));
+
+        let (tx_del_chk, rx_del_chk) = std::sync::mpsc::channel();
+        let (wtx_del_chk, _) = std::sync::mpsc::channel();
+        let _ = get_task_tx().send(LispTask::WithTab {
+            tab_id,
+            task: Box::new(LispTask::Eval {
+                code: "_test_deleted".to_string(),
+                resp: tx_del_chk,
+                worker_tx: wtx_del_chk,
+            }),
+        });
+        assert_eq!(rx_del_chk.recv().unwrap().unwrap().as_deref(), Some("T"));
+
+        // 3. Test pressing Enter on entsel returns nil cleanly without falling back to entlast
+        let (worker_tx2, worker_rx2) = std::sync::mpsc::channel();
+        let (done_tx2, done_rx2) = std::sync::mpsc::channel();
+        let _ = get_task_tx().send(LispTask::WithTab {
+            tab_id,
+            task: Box::new(LispTask::ExecuteCommand {
+                lisp_call: "(c:entsel_cancel_test)".to_string(),
+                worker_tx: worker_tx2,
+                done: done_tx2,
+            }),
+        });
+
+        let mut cmd2 = loop {
+            match worker_rx2.recv().unwrap() {
+                WorkerMsg::HostCall(mut task) => task(&mut mock_host),
+                WorkerMsg::InteractiveStarted(c) => break c,
+                WorkerMsg::Finished(r) => panic!("Expected InteractiveStarted, got Finished({:?})", r),
+            }
+        };
+        assert!(cmd2.needs_object_pick());
+        assert_eq!(cmd2.prompt(), "\nPick or press Enter: ");
+
+        let step2 = cmd2.on_enter();
+        done_rx2.recv().unwrap();
+        assert!(
+            matches!(step2, ocs_plugin_api::host::CommandStep::Done),
+            "Expected CommandStep::Done after Enter cancel, got {:?}",
+            step2
+        );
+
+        let (tx_chk2, rx_chk2) = std::sync::mpsc::channel();
+        let (wtx_chk2, _) = std::sync::mpsc::channel();
+        let _ = get_task_tx().send(LispTask::WithTab {
+            tab_id,
+            task: Box::new(LispTask::Eval {
+                code: "(null _test_cancel_sel)".to_string(),
+                resp: tx_chk2,
+                worker_tx: wtx_chk2,
+            }),
+        });
+        assert_eq!(rx_chk2.recv().unwrap().unwrap().as_deref(), Some("T"));
+
+        clean_tab_state(tab_id);
+    }
+
+    #[test]
+    fn test_dual_mode_command_resolution_and_initdia() {
+        let bridge = std::sync::Arc::new(std::sync::Mutex::new(OpenCadRustBridge::new()));
+        let mut env = lisp_cad::create_cad_env(bridge.clone());
+
+        // 1. (command "LAYER" "M" "TestLay" "") automatically resolves to "-LAYER M TestLay ENTER" and updates CLAYER
+        lisp_core::eval_str(r#"(command "LAYER" "M" "TestLay" "")"#, &mut env).unwrap();
+        {
+            let br = bridge.lock().unwrap();
+            assert_eq!(br.executed_commands.last().map(|s| s.as_str()), Some("-LAYER M TestLay ENTER"));
+            assert_eq!(br.get_var("CLAYER").unwrap(), DxfValue::Str("TestLay".into()));
+            assert_eq!(br.active_host_command, None);
+        }
+
+        // 2. Prefix stripping for both "_.layer" and "_.-layer"
+        lisp_core::eval_str(r#"(command "_.layer" "_m" "TestLay2" "")"#, &mut env).unwrap();
+        assert_eq!(
+            bridge.lock().unwrap().executed_commands.last().map(|s| s.as_str()),
+            Some("-LAYER _m TestLay2 ENTER")
+        );
+        lisp_core::eval_str(r#"(command "_.-layer" "_m" "TestLay3" "")"#, &mut env).unwrap();
+        assert_eq!(
+            bridge.lock().unwrap().executed_commands.last().map(|s| s.as_str()),
+            Some("-LAYER _m TestLay3 ENTER")
+        );
+
+        // 3. (initdia 1) preserves GUI dialog command once, then resets init_dia_flag
+        lisp_core::eval_str(r#"(initdia 1)"#, &mut env).unwrap();
+        assert!(bridge.lock().unwrap().init_dia_flag);
+        lisp_core::eval_str(r#"(command "LAYER")"#, &mut env).unwrap();
+        {
+            let br = bridge.lock().unwrap();
+            assert_eq!(br.executed_commands.last().map(|s| s.as_str()), Some("LAYER"));
+            assert!(!br.init_dia_flag);
+        }
+        lisp_core::eval_str(r#"(command "LAYER" "M" "AfterDia" "")"#, &mut env).unwrap();
+        assert_eq!(
+            bridge.lock().unwrap().executed_commands.last().map(|s| s.as_str()),
+            Some("-LAYER M AfterDia ENTER")
+        );
+
+        // 4. Progressive multi-call (command "LAYER") followed by (command "M" "SplitLay" "")
+        lisp_core::eval_str(r#"(command "LAYER")"#, &mut env).unwrap();
+        {
+            let br = bridge.lock().unwrap();
+            assert_eq!(br.executed_commands.last().map(|s| s.as_str()), Some("-LAYER"));
+            assert_eq!(br.active_host_command.as_deref(), Some("-LAYER"));
+        }
+        lisp_core::eval_str(r#"(command "M" "SplitLay" "")"#, &mut env).unwrap();
+        {
+            let br = bridge.lock().unwrap();
+            assert_eq!(br.executed_commands.last().map(|s| s.as_str()), Some("M SplitLay ENTER"));
+            assert_eq!(br.get_var("CLAYER").unwrap(), DxfValue::Str("SplitLay".into()));
+            assert_eq!(br.active_host_command, None);
+        }
+
+        // 5. (vl-cmdf) returns T and resolves INSERT -> -INSERT
+        let vl_res = lisp_core::eval_str(r#"(vl-cmdf "INSERT" "MyBlock" '(0 0) 1 1 0)"#, &mut env).unwrap();
+        assert_eq!(vl_res, lisp_core::Value::T);
+        assert_eq!(
+            bridge.lock().unwrap().executed_commands.last().map(|s| s.as_str()),
+            Some("-INSERT MyBlock 0.0000,0.0000 1 1 0")
+        );
+
+        // 6. (command-s) returns nil and resolves PURGE -> -PURGE
+        let cs_res = lisp_core::eval_str(r#"(command-s "PURGE" "A" "*" "N")"#, &mut env).unwrap();
+        assert_eq!(cs_res, lisp_core::Value::Nil);
+        assert_eq!(
+            bridge.lock().unwrap().executed_commands.last().map(|s| s.as_str()),
+            Some("-PURGE A * N")
+        );
+
+        // 7. Empty (command) cancels an open -LAYER session with ESC
+        lisp_core::eval_str(r#"(command "LA" "M" "UnclosedLayer")"#, &mut env).unwrap();
+        assert_eq!(bridge.lock().unwrap().active_host_command.as_deref(), Some("-LAYER"));
+        lisp_core::eval_str(r#"(command)"#, &mut env).unwrap();
+        {
+            let br = bridge.lock().unwrap();
+            assert_eq!(br.executed_commands.last().map(|s| s.as_str()), Some("ESC"));
+            assert_eq!(br.active_host_command, None);
+        }
     }
 }
 
